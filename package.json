@@ -1,5 +1,6 @@
 {
   "name": "ex-electron",
+  "productName": "ex",
   "version": "0.1.0",
   "description": "Desktop shell for the ex team chat.",
   "private": true,

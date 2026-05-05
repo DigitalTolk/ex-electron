@@ -21,7 +21,9 @@ jobs:
             script: dist:mac
           - os: ubuntu-latest
             script: dist:linux
-          - os: windows-latest
+          # Pinned to the VS-2026 image; `windows-latest` is being redirected
+          # to this same image by 2026-05-12 anyway.
+          - os: windows-2025-vs2026
             script: dist:win
     runs-on: ${{ matrix.os }}
     steps:
@@ -32,6 +34,15 @@ jobs:
         with:
           node-version: '24'
           cache: npm
+      # Pin xcode-select to an Xcode 26 install so the icon pipeline can find
+      # Icon Composer / ictool deterministically. macos-26 ships multiple
+      # Xcodes; the unversioned /Applications/Xcode.app may not exist.
+      - name: Select Xcode 26 (macOS only)
+        if: runner.os == 'macOS'
+        run: |
+          ls /Applications | grep -i '^Xcode' || true
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)/Contents/Developer"
+          xcodebuild -version
       - run: npm ci
       - name: Package
         run: npm run ${{ matrix.script }}

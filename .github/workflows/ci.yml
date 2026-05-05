@@ -40,7 +40,9 @@ jobs:
           # the .icon source into Assets.car for macOS 26's dynamic icon.
           - os: macos-26
           - os: ubuntu-latest
-          - os: windows-latest
+          # Pinned to the VS-2026 image; `windows-latest` is being redirected
+          # to this same image by 2026-05-12 anyway.
+          - os: windows-2025-vs2026
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -50,6 +52,15 @@ jobs:
         with:
           node-version: '24'
           cache: npm
+      # Make sure xcode-select points at an Xcode 26 install on the macos-26
+      # runner. Without this the unversioned /Applications/Xcode.app symlink
+      # may be missing or stale, and the icon pipeline can't find ictool.
+      - name: Select Xcode 26 (macOS only)
+        if: runner.os == 'macOS'
+        run: |
+          ls /Applications | grep -i '^Xcode' || true
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)/Contents/Developer"
+          xcodebuild -version
       - run: npm ci
       - run: npm run bundle
       - run: npm run icons

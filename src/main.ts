@@ -3,11 +3,14 @@ import {
   BrowserWindow,
   Tray,
   Menu,
+  clipboard,
   ipcMain,
   shell,
   nativeImage,
   nativeTheme,
   session,
+  type ContextMenuParams,
+  type MenuItemConstructorOptions,
   type NativeImage,
 } from 'electron';
 import path from 'node:path';
@@ -19,6 +22,11 @@ import { parseUnreadCount } from './lib/title';
 import { overlayBadgeSvg } from './lib/overlay';
 
 let isQuitting = false;
+
+// Drives the macOS application menu labels: "About ex", "Hide ex", "Quit ex".
+// Electron's default menu reads from app.getName(); this also covers `electron .`
+// in dev where there's no .app bundle to fall back to.
+app.setName('ex');
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -150,13 +158,20 @@ function createChatWindow(): void {
     }
   });
 
+  chatWindow.webContents.on('context-menu', (_event, params) => {
+    if (!chatWindow) return;
+    const items = chatContextMenuItems(params);
+    if (items.length === 0) return;
+    Menu.buildFromTemplate(items).popup({ window: chatWindow });
+  });
+
   chatWindow.webContents.on('page-title-updated', (event, title) => {
     // The chat SPA writes "(N) channel · ex" into its <title>. We pull the
     // unread count out for the dock badge and tray, then explicitly pin our
     // own title so the OS chrome never shows the (N) prefix.
     event.preventDefault();
     setUnreadCount(parseUnreadCount(title));
-    chatWindow?.setTitle('ex');
+    if (chatWindow && chatWindow.getTitle() !== 'ex') chatWindow.setTitle('ex');
   });
 
   chatWindow.on('close', (event) => {
@@ -277,6 +292,34 @@ async function startDesktopAuth(): Promise<void> {
 
 // ---- tray + unread badge ---------------------------------------------------
 
+// Right-click menu for the chat window. The chat host is untrusted so we keep
+// this minimal: copy a link target if there is one, plus the standard
+// edit-role items (cut/copy/paste). Everything routes through Electron's own
+// roles so behavior matches the OS.
+function chatContextMenuItems(params: ContextMenuParams): MenuItemConstructorOptions[] {
+  const items: MenuItemConstructorOptions[] = [];
+
+  if (params.linkURL) {
+    items.push({
+      label: 'Copy link',
+      click: () => clipboard.writeText(params.linkURL),
+    });
+  }
+
+  if (params.isEditable) {
+    if (items.length > 0) items.push({ type: 'separator' });
+    if (params.editFlags.canCut) items.push({ role: 'cut' });
+    if (params.editFlags.canCopy) items.push({ role: 'copy' });
+    if (params.editFlags.canPaste) items.push({ role: 'paste' });
+    if (params.editFlags.canSelectAll) items.push({ role: 'selectAll' });
+  } else if (params.selectionText && params.selectionText.length > 0) {
+    if (items.length > 0) items.push({ type: 'separator' });
+    items.push({ role: 'copy' });
+  }
+
+  return items;
+}
+
 function buildTrayMenu(): Menu {
   return Menu.buildFromTemplate([
     { label: 'Open ex', click: () => showOrCreateChat() },
@@ -303,19 +346,40 @@ function buildTrayMenu(): Menu {
   ]);
 }
 
+// Cache the current tray state so we only mutate NSStatusItem when something
+// actually changed. The chat SPA updates its title constantly (typing
+// indicators, channel switches, unread bumps) and unconditional churn on the
+// status bar has been observed to interact badly with macOS focus tracking.
+let lastTrayImagePath: string | null = null;
+let lastTrayTooltip: string | null = null;
+let lastTrayMenuKey: string | null = null;
+
 function refreshTrayImage(): void {
   if (!tray) return;
   const { path: imgPath, template } = trayImageFor(unreadCount);
+  if (imgPath === lastTrayImagePath) return;
   const image = nativeImage.createFromPath(imgPath);
   if (template) image.setTemplateImage(true);
   tray.setImage(image.isEmpty() ? nativeImage.createEmpty() : image);
+  lastTrayImagePath = imgPath;
 }
 
 function refreshTray(): void {
   if (!tray) return;
   refreshTrayImage();
-  tray.setContextMenu(buildTrayMenu());
-  tray.setToolTip(unreadCount > 0 ? `ex — ${unreadCount} unread` : 'ex');
+  const tooltip = unreadCount > 0 ? `ex — ${unreadCount} unread` : 'ex';
+  if (tooltip !== lastTrayTooltip) {
+    tray.setToolTip(tooltip);
+    lastTrayTooltip = tooltip;
+  }
+  // Menu only depends on whether chatUrl is configured + unread count flips
+  // between zero / non-zero (it doesn't render the count). Skip rebuilding
+  // it for every keystroke-driven title bump.
+  const menuKey = `${settings.chatUrl ? 'connected' : 'setup'}|${unreadCount > 0 ? 'unread' : 'clear'}`;
+  if (menuKey !== lastTrayMenuKey) {
+    tray.setContextMenu(buildTrayMenu());
+    lastTrayMenuKey = menuKey;
+  }
 }
 
 function createTray(): void {
@@ -331,7 +395,9 @@ function createTray(): void {
 }
 
 function setUnreadCount(n: number): void {
-  unreadCount = Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
+  const next = Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
+  if (next === unreadCount) return;
+  unreadCount = next;
   app.setBadgeCount(unreadCount);
   refreshTray();
   if (process.platform === 'win32' && chatWindow) {

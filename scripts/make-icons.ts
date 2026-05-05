@@ -20,11 +20,34 @@ import os from 'node:os';
 import sharp from 'sharp';
 import pngToIco from 'png-to-ico';
 
-const ICTOOL_PATH = '/Applications/Xcode.app/Contents/Applications/Icon Composer.app/Contents/Executables/ictool';
-
 const ROOT = process.cwd();
 const ASSETS = path.join(ROOT, 'assets');
 const BUILD = path.join(ROOT, 'build');
+
+// Resolve Icon Composer's CLI (`ictool`) via the active Xcode. Hardcoding
+// /Applications/Xcode.app fails on GitHub Actions macos runners where the
+// active Xcode lives at /Applications/Xcode_26.x.app and the unversioned
+// symlink may not exist. Using `xcode-select -p` follows whatever the runner
+// has selected.
+let ictoolPathCache: string | null | undefined;
+function findIctool(): string | null {
+  if (ictoolPathCache !== undefined) return ictoolPathCache;
+  try {
+    const developer = execFileSync('xcode-select', ['-p'], { encoding: 'utf8' }).trim();
+    // Xcode.app/Contents/Developer → Xcode.app/Contents/Applications/Icon Composer.app
+    const xcodeAppContents = path.dirname(developer);
+    const candidate = path.join(
+      xcodeAppContents,
+      'Applications/Icon Composer.app/Contents/Executables/ictool',
+    );
+    execFileSync('test', ['-x', candidate], { stdio: 'ignore' });
+    ictoolPathCache = candidate;
+    return candidate;
+  } catch {
+    ictoolPathCache = null;
+    return null;
+  }
+}
 
 interface IconJson {
   fill: { 'automatic-gradient'?: string };
@@ -65,20 +88,17 @@ async function renderSvg(svg: string, size: number): Promise<Buffer> {
 }
 
 async function ictoolAvailable(): Promise<boolean> {
-  try {
-    await fs.access(ICTOOL_PATH);
-    return true;
-  } catch {
-    return false;
-  }
+  return findIctool() !== null;
 }
 
-async function renderWithIctool(rendition: 'Default', size: number): Promise<Buffer> {
+async function renderWithIctool(rendition: 'Default' | 'Dark', size: number): Promise<Buffer> {
+  const ictool = findIctool();
+  if (!ictool) throw new Error('ictool not found — Xcode 26+ Icon Composer is required');
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'ex-ictool-'));
   const out = path.join(tmp, 'icon.png');
   try {
     execFileSync(
-      ICTOOL_PATH,
+      ictool,
       [
         path.join(ASSETS, 'ex.icon'),
         '--export-image',
@@ -151,27 +171,29 @@ async function makeMacIconPng(): Promise<Buffer> {
   return manualMacIconPng();
 }
 
-// Compiles the .icon source into Assets.car via actool. macOS reads this from
-// Contents/Resources/Assets.car when Info.plist's CFBundleIconName is set,
-// and renders the .icon dynamically — Aqua / DarkAqua / Tinted / Clear glass
-// — at the bundle level. The asset's name in the catalog comes from the
-// .icon file's basename, so we copy assets/ex.icon → tmp/AppIcon.icon to
-// match the conventional Info.plist name.
+// Compiles assets/ex.icon (Icon Composer document) into Assets.car via actool.
+// macOS reads CFBundleIconName from Info.plist and pulls the AppIcon entry
+// out of Assets.car at the bundle level; on Tahoe (macOS 26+) IconKit reads
+// the layered IconGroup and renders dynamically — Aqua / DarkAqua / Tinted /
+// Clear glass — based on system appearance.
+//
+// Note: visible dark vs light differentiation comes from the .icon source
+// itself. Our icon.json has a single group with `automatic-gradient`, so
+// IconKit applies appearance-aware tinting but the visual delta is subtle.
+// To make dark mode obviously distinct, edit ex.icon in Icon Composer and add
+// a dark-mode group; that produces NSAppearanceNameDarkAqua-tagged renditions
+// which will switch hard.
 async function makeAssetsCar(): Promise<void> {
-  // actool only ships in Xcode's Developer toolchain on macOS.
-  let actoolAvailable = false;
   try {
     execFileSync('xcrun', ['--find', 'actool'], { stdio: 'ignore' });
-    actoolAvailable = true;
   } catch {
-    // skipped silently
-  }
-  if (!actoolAvailable) {
     console.log('actool not available — skipping Assets.car (Linux/Windows CI is fine)');
     return;
   }
 
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'ex-actool-'));
+  // Asset name in the catalog comes from the .icon directory name, so stage
+  // the user's ex.icon under "AppIcon.icon" to match CFBundleIconName=AppIcon.
   const stagedIcon = path.join(tmp, 'AppIcon.icon');
   const outDir = path.join(tmp, 'out');
   const partialPlist = path.join(tmp, 'partial.plist');
@@ -307,13 +329,52 @@ async function makeTray(): Promise<void> {
   await rasterTray(trayWithBadge('#000000'), 'trayBadged');
 }
 
+function probeXcodeToolchain(): { ictool: string | null; actool: boolean; iconutil: boolean } {
+  const ictool = findIctool();
+  let actool = false;
+  let iconutil = false;
+  try {
+    execFileSync('xcrun', ['--find', 'actool'], { stdio: 'ignore' });
+    actool = true;
+  } catch { /* missing */ }
+  try {
+    execFileSync('which', ['iconutil'], { stdio: 'ignore' });
+    iconutil = true;
+  } catch { /* missing */ }
+  return { ictool, actool, iconutil };
+}
+
 async function main(): Promise<void> {
   await fs.mkdir(BUILD, { recursive: true });
+
+  // On macOS, the Mac icon pipeline absolutely requires Xcode's Icon Composer
+  // and actool. If they're missing, fall through to the manual sharp fallback
+  // would silently ship a wrong-looking app icon — exactly the local-vs-CI
+  // drift this is meant to prevent. Fail loudly instead so the runner config
+  // gets fixed.
+  if (process.platform === 'darwin') {
+    const tools = probeXcodeToolchain();
+    let xcodePath: string | null = null;
+    try {
+      xcodePath = execFileSync('xcode-select', ['-p'], { encoding: 'utf8' }).trim();
+    } catch { /* missing */ }
+    console.log('[icons] xcode-select:', xcodePath ?? '(none)');
+    console.log('[icons] ictool:      ', tools.ictool ?? '(missing)');
+    console.log('[icons] actool:      ', tools.actool ? 'available' : '(missing)');
+    console.log('[icons] iconutil:    ', tools.iconutil ? 'available' : '(missing)');
+    if (!tools.ictool || !tools.actool || !tools.iconutil) {
+      throw new Error(
+        'Xcode toolchain incomplete on this macOS host. Need ictool (Icon ' +
+        'Composer), actool, and iconutil. Run `sudo xcode-select -s ' +
+        '/Applications/Xcode_<26+>.app/Contents/Developer` and re-run.',
+      );
+    }
+  }
 
   const macPng = await makeMacIconPng();
   await fs.writeFile(path.join(BUILD, 'icon-mac-1024.png'), macPng);
   const icns = await makeIcns(macPng);
-  if (!icns) {
+  if (!icns && process.platform !== 'darwin') {
     console.warn('iconutil not available — wrote icon-mac-1024.png; .icns will be skipped.');
   }
 
