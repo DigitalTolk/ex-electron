@@ -36,6 +36,9 @@ mac:
 linux:
   icon: build/icon.png
   category: Network
+  # .deb requires a maintainer with an email address. fpm reads this when
+  # generating Debian control metadata; without it the deb step aborts.
+  maintainer: DigitalTolk <dev@digitaltolk.com>
   target:
     - target: AppImage
       arch:
