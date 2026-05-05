@@ -42,8 +42,12 @@ build:
 dev:
 	npm run start
 
+# Local Mac builds default to ad-hoc signing + no notarization. This sidesteps
+# the keychain prompt that hangs codesign on first use and avoids needing the
+# Developer ID cert on your machine. CI sets CSC_LINK/APPLE_ID and runs
+# `npm run dist:mac` directly, which uses the real signing flow.
 dist-mac:
-	npm run dist:mac
+	CSC_IDENTITY_AUTO_DISCOVERY=false npm run dist:mac -- --config.mac.notarize=false
 
 dist-linux:
 	npm run dist:linux

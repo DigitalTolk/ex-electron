@@ -19,7 +19,7 @@ form.addEventListener('submit', async (event) => {
 
   button.disabled = true;
   try {
-    await window.exDesktop.saveChatUrl(normalized);
+    await window.exElectron.saveChatUrl(normalized);
   } catch (e) {
     err.textContent = e instanceof Error ? e.message : 'Failed to save URL.';
     button.disabled = false;

@@ -6,6 +6,7 @@ import {
   ipcMain,
   shell,
   nativeImage,
+  nativeTheme,
   session,
   type NativeImage,
 } from 'electron';
@@ -25,7 +26,7 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 if (process.platform === 'win32') {
-  app.setAppUserModelId('com.lifeofguenter.ex.desktop');
+  app.setAppUserModelId('com.digitaltolk.ex.electron');
 }
 
 const SETTINGS_FILE = path.join(app.getPath('userData'), 'settings.json');
@@ -41,25 +42,51 @@ const ICONS_DIR = app.isPackaged
   ? path.join(process.resourcesPath, 'icons')
   : path.join(__dirname, '..', 'build');
 
+// macOS reads the dock/Finder icon from the app bundle (CFBundleIconName →
+// Assets.car for dynamic theming, with CFBundleIconFile → icon.icns as the
+// legacy fallback). We don't override it at runtime — that would defeat the
+// system's appearance-aware rendering.
 function appIconPath(): string {
   if (process.platform === 'win32') return path.join(ICONS_DIR, 'icon.ico');
   return path.join(ICONS_DIR, 'icon.png');
 }
 
-function trayIconPath(): string {
-  if (process.platform === 'darwin') return path.join(ICONS_DIR, 'trayTemplate.png');
-  return path.join(ICONS_DIR, 'tray.png');
+interface TrayImage {
+  path: string;
+  template: boolean;
+}
+
+// Tray icon decision tree:
+//   no unread, macOS  → black glyph as a template image; menu bar re-tints
+//   no unread, others → same black glyph but as a regular image
+//   unread,  macOS    → glyph + pink dot; appearance-aware (light/dark) so
+//                       we can't use a template here. We swap the variant on
+//                       nativeTheme changes instead.
+//   unread, others    → glyph + pink dot; system tray background is stable
+//                       so a single colour variant is enough
+function trayImageFor(unread: number): TrayImage {
+  const dir = ICONS_DIR;
+  const isDarwin = process.platform === 'darwin';
+  if (unread === 0) {
+    if (isDarwin) return { path: path.join(dir, 'trayTemplate.png'), template: true };
+    return { path: path.join(dir, 'tray.png'), template: false };
+  }
+  if (isDarwin) {
+    const variant = nativeTheme.shouldUseDarkColors ? 'trayBadgedDark.png' : 'trayBadgedLight.png';
+    return { path: path.join(dir, variant), template: false };
+  }
+  return { path: path.join(dir, 'trayBadged.png'), template: false };
 }
 
 function createSetupWindow(): void {
   setupWindow = new BrowserWindow({
-    width: 440,
-    height: 360,
+    width: 640,
+    height: 560,
     resizable: false,
     minimizable: false,
     maximizable: false,
     fullscreenable: false,
-    title: 'Ex — Connect',
+    title: 'ex — Connect',
     icon: appIconPath(),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -83,7 +110,7 @@ function createChatWindow(): void {
     height: 820,
     minWidth: 720,
     minHeight: 480,
-    title: 'Ex',
+    title: 'ex',
     icon: appIconPath(),
     backgroundColor: '#0a0a0a',
     webPreferences: {
@@ -124,8 +151,12 @@ function createChatWindow(): void {
   });
 
   chatWindow.webContents.on('page-title-updated', (event, title) => {
+    // The chat SPA writes "(N) channel · ex" into its <title>. We pull the
+    // unread count out for the dock badge and tray, then explicitly pin our
+    // own title so the OS chrome never shows the (N) prefix.
     event.preventDefault();
     setUnreadCount(parseUnreadCount(title));
+    chatWindow?.setTitle('ex');
   });
 
   chatWindow.on('close', (event) => {
@@ -199,11 +230,33 @@ async function startDesktopAuth(): Promise<void> {
       res.end('Missing desktop_code.');
       return;
     }
+    // Brand-themed callback page that asks the browser to close itself.
+    // window.close() only succeeds when the browser considers the tab
+    // script-closeable (Chrome/Edge usually allow it after this redirect
+    // chain; Safari does not). The visible message is the fallback.
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    res.end(`<!doctype html><meta charset="utf-8"><title>Signed in</title>
-<style>body{font:15px -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;
-  display:grid;place-items:center;height:100vh;margin:0;color:#1f2937}</style>
-<p>Signed in. You can close this tab and return to Ex.</p>`);
+    res.end(`<!doctype html>
+<meta charset="utf-8"><title>Signed in</title>
+<style>
+  :root { --dt-black:#231F20; --dt-pink:#DE5D83; --dt-muted:#6B6466; }
+  html,body{margin:0;height:100%;}
+  body{
+    display:grid;place-items:center;background:#fff;color:var(--dt-black);
+    font:16px/1.5 "Proxima Nova","Avenir Next","Inter",
+      -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  }
+  .card{text-align:center;max-width:360px;padding:32px;}
+  .dot{width:14px;height:14px;border-radius:50%;background:var(--dt-pink);
+    display:inline-block;margin-right:8px;vertical-align:middle;}
+  h1{font-family:"Futura","Futura PT","Avenir Next",sans-serif;font-weight:600;
+    font-size:22px;margin:0 0 8px;letter-spacing:-0.01em;}
+  p{margin:0;color:var(--dt-muted);font-size:15px;}
+</style>
+<div class="card">
+  <h1><span class="dot"></span>Signed in</h1>
+  <p>You can close this tab and return to ex.</p>
+</div>
+<script>setTimeout(function(){try{window.close();}catch(_){}}, 200);</script>`);
     cleanup();
 
     if (chatWindow && settings.chatUrl) {
@@ -226,7 +279,7 @@ async function startDesktopAuth(): Promise<void> {
 
 function buildTrayMenu(): Menu {
   return Menu.buildFromTemplate([
-    { label: 'Open Ex', click: () => showOrCreateChat() },
+    { label: 'Open ex', click: () => showOrCreateChat() },
     {
       label: 'Sign out',
       enabled: !!settings.chatUrl,
@@ -250,18 +303,31 @@ function buildTrayMenu(): Menu {
   ]);
 }
 
+function refreshTrayImage(): void {
+  if (!tray) return;
+  const { path: imgPath, template } = trayImageFor(unreadCount);
+  const image = nativeImage.createFromPath(imgPath);
+  if (template) image.setTemplateImage(true);
+  tray.setImage(image.isEmpty() ? nativeImage.createEmpty() : image);
+}
+
 function refreshTray(): void {
   if (!tray) return;
+  refreshTrayImage();
   tray.setContextMenu(buildTrayMenu());
-  tray.setToolTip(unreadCount > 0 ? `Ex — ${unreadCount} unread` : 'Ex');
+  tray.setToolTip(unreadCount > 0 ? `ex — ${unreadCount} unread` : 'ex');
 }
 
 function createTray(): void {
-  const image = nativeImage.createFromPath(trayIconPath());
-  if (process.platform === 'darwin') image.setTemplateImage(true);
+  const { path: imgPath, template } = trayImageFor(0);
+  const image = nativeImage.createFromPath(imgPath);
+  if (template) image.setTemplateImage(true);
   tray = new Tray(image.isEmpty() ? nativeImage.createEmpty() : image);
   tray.on('click', () => showOrCreateChat());
   refreshTray();
+  // Re-render when the user toggles dark mode, since the badged variants are
+  // appearance-specific (the badge dot is non-template so we can't auto-tint).
+  nativeTheme.on('updated', refreshTrayImage);
 }
 
 function setUnreadCount(n: number): void {

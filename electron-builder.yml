@@ -1,6 +1,6 @@
-appId: com.lifeofguenter.ex.desktop
-productName: Ex
-copyright: Copyright © 2026 Günter Grodotzki
+appId: com.digitaltolk.ex.electron
+productName: ex
+copyright: Copyright © 2026 DigitalTolk
 directories:
   output: release
   buildResources: build
@@ -24,6 +24,14 @@ mac:
   gatekeeperAssess: false
   notarize: true
   artifactName: ${productName}-${version}-mac-${arch}.${ext}
+  # CFBundleIconName drives macOS 26's dynamic icon rendering from Assets.car
+  # (Aqua / DarkAqua / Tinted / Clear / liquid-glass). CFBundleIconFile stays
+  # set to the static icon.icns as a fallback for older systems.
+  extendInfo:
+    CFBundleIconName: AppIcon
+  extraResources:
+    - from: build/Assets.car
+      to: Assets.car
 
 linux:
   icon: build/icon.png
@@ -67,9 +75,21 @@ extraResources:
     to: icons/tray.png
   - from: build/tray@2x.png
     to: icons/tray@2x.png
+  - from: build/trayBadged.png
+    to: icons/trayBadged.png
+  - from: build/trayBadged@2x.png
+    to: icons/trayBadged@2x.png
   - from: build/trayTemplate.png
     to: icons/trayTemplate.png
   - from: build/trayTemplate@2x.png
     to: icons/trayTemplate@2x.png
+  - from: build/trayBadgedLight.png
+    to: icons/trayBadgedLight.png
+  - from: build/trayBadgedLight@2x.png
+    to: icons/trayBadgedLight@2x.png
+  - from: build/trayBadgedDark.png
+    to: icons/trayBadgedDark.png
+  - from: build/trayBadgedDark@2x.png
+    to: icons/trayBadgedDark@2x.png
   - from: assets/ex.icon
     to: AppIcon.icon

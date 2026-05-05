@@ -1,10 +1,10 @@
 {
-  "name": "ex-desktop",
+  "name": "ex-electron",
   "version": "0.1.0",
   "description": "Desktop shell for the ex team chat.",
   "private": true,
   "main": "dist/main.js",
-  "author": "Günter Grodotzki",
+  "author": "DigitalTolk",
   "license": "MIT",
   "scripts": {
     "icons": "tsx scripts/make-icons.ts",
@@ -23,18 +23,21 @@
     "dist:all": "npm run build && tsx scripts/build-app.ts --mac --arm64 --linux --x64 --arm64 --win --x64 --arm64"
   },
   "devDependencies": {
-    "@eslint/js": "^9.15.0",
-    "@types/node": "^22.10.0",
-    "@vitest/coverage-v8": "^2.1.0",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.0.0",
+    "@vitest/coverage-v8": "^4.1.5",
     "electron": "^41.5.0",
     "electron-builder": "^26.8.1",
-    "esbuild": "^0.24.0",
-    "eslint": "^9.15.0",
+    "esbuild": "^0.28.0",
+    "eslint": "^10.3.0",
     "png-to-ico": "^3.0.1",
     "sharp": "^0.34.5",
-    "tsx": "^4.19.0",
-    "typescript": "^5.7.0",
-    "typescript-eslint": "^8.16.0",
-    "vitest": "^2.1.0"
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.59.2",
+    "vitest": "^4.1.5"
+  },
+  "engines": {
+    "node": ">=24"
   }
 }
