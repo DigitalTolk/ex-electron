@@ -121,6 +121,22 @@ function createChatWindow(): void {
     title: 'ex',
     icon: appIconPath(),
     backgroundColor: '#0a0a0a',
+    // The chat SPA already has its own top bar with empty space on either
+    // side, so we drop the native title bar and let the window controls
+    // overlay it — Slack/Discord/VS Code pattern. On macOS the traffic
+    // lights sit at top-left; on Windows/Linux the min/max/close buttons
+    // sit at top-right via titleBarOverlay (Linux requires a CSD-capable
+    // compositor like GNOME, otherwise it falls back to no controls).
+    ...(process.platform === 'darwin'
+      ? { titleBarStyle: 'hiddenInset' as const }
+      : {
+          titleBarStyle: 'hidden' as const,
+          titleBarOverlay: {
+            color: '#0a0a0a',
+            symbolColor: '#ffffff',
+            height: 40,
+          },
+        }),
     webPreferences: {
       preload: path.join(__dirname, 'chat-preload.js'),
       contextIsolation: true,
