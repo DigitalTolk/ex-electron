@@ -1,0 +1,72 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: daily
+      time: "06:00"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+    groups:
+      electron:
+        patterns:
+          - electron
+          - electron-builder
+      typescript:
+        patterns:
+          - typescript
+          - typescript-eslint
+          - "@typescript-eslint/*"
+          - "@types/*"
+      lint:
+        patterns:
+          - eslint
+          - "@eslint/*"
+      test:
+        patterns:
+          - vitest
+          - "@vitest/*"
+      build:
+        patterns:
+          - esbuild
+          - tsx
+      assets:
+        patterns:
+          - sharp
+          - png-to-ico
+      production-deps:
+        dependency-type: production
+      dev-deps:
+        dependency-type: development
+        exclude-patterns:
+          - electron
+          - electron-builder
+          - typescript
+          - typescript-eslint
+          - "@typescript-eslint/*"
+          - "@types/*"
+          - eslint
+          - "@eslint/*"
+          - vitest
+          - "@vitest/*"
+          - esbuild
+          - tsx
+          - sharp
+          - png-to-ico
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: daily
+      time: "06:00"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - ci
+    groups:
+      actions:
+        patterns:
+          - "*"
