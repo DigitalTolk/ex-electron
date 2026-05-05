@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="512" height="512">
+  <!-- Main chat bubble: white fill (70%) with dark stroke (25%) -->
+  <path d="M12 12 H52 A6 6 0 0 1 58 18 V40 A6 6 0 0 1 52 46 H28 L18 56 V46 H12 A6 6 0 0 1 6 40 V18 A6 6 0 0 1 12 12 Z"
+        fill="#ffffff"
+        stroke="#231F20"
+        stroke-width="3"
+        stroke-linejoin="round"/>
+  <!-- Three dots: dark (25%) with one accent dot in pink (5%) -->
+  <circle cx="20" cy="29" r="3" fill="#231F20"/>
+  <circle cx="32" cy="29" r="3" fill="#231F20"/>
+  <circle cx="44" cy="29" r="3" fill="#DE5D83"/>
+</svg>

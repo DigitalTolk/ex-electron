@@ -1,1 +1,1 @@
-# ex-desktop2
+# ex-electron

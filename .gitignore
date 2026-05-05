@@ -1,0 +1,13 @@
+/.idea/
+/.env
+
+/.claude/settings.local.json
+/AGENTS.md
+
+node_modules/
+dist/
+release/
+build/
+coverage/
+*.tsbuildinfo
+.DS_Store

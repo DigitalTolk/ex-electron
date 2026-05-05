@@ -1,0 +1,41 @@
+{
+  "fill" : {
+    "automatic-gradient" : "extended-srgb:0.00000,0.53333,1.00000,1.00000"
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "glass" : false,
+          "image-name" : "04-dot-accent.svg",
+          "name" : "04-dot-accent"
+        },
+        {
+          "glass" : false,
+          "image-name" : "03-dots-dark.svg",
+          "name" : "03-dots-dark"
+        },
+        {
+          "glass" : false,
+          "hidden" : false,
+          "image-name" : "01-bubble-fill.svg",
+          "name" : "01-bubble-fill"
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}
