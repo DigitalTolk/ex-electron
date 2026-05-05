@@ -332,11 +332,6 @@ function buildTrayMenu(): Menu {
     },
     { type: 'separator' },
     {
-      label: 'Change chat URL…',
-      click: () => changeChatUrl(),
-    },
-    { type: 'separator' },
-    {
       label: 'Quit',
       click: () => {
         isQuitting = true;
@@ -344,6 +339,49 @@ function buildTrayMenu(): Menu {
       },
     },
   ]);
+}
+
+// Application menu (macOS top menu bar; menu bar inside the window on Linux/
+// Windows). "Change Server…" lives here so it's discoverable without going
+// through the tray. Everything else is delegated to Electron's stock roles
+// to match the OS conventions.
+function buildApplicationMenu(): Menu {
+  const template: MenuItemConstructorOptions[] = [];
+  const changeServer: MenuItemConstructorOptions = {
+    label: 'Change Server…',
+    click: () => changeChatUrl(),
+  };
+
+  if (process.platform === 'darwin') {
+    template.push({
+      label: app.getName(),
+      submenu: [
+        { role: 'about' },
+        { type: 'separator' },
+        changeServer,
+        { type: 'separator' },
+        { role: 'services' },
+        { type: 'separator' },
+        { role: 'hide' },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        { role: 'quit' },
+      ],
+    });
+  } else {
+    template.push({
+      label: '&File',
+      submenu: [changeServer, { type: 'separator' }, { role: 'quit' }],
+    });
+  }
+
+  template.push(
+    { role: 'editMenu' },
+    { role: 'viewMenu' },
+    { role: 'windowMenu' },
+  );
+  return Menu.buildFromTemplate(template);
 }
 
 // Cache the current tray state so we only mutate NSStatusItem when something
@@ -372,10 +410,10 @@ function refreshTray(): void {
     tray.setToolTip(tooltip);
     lastTrayTooltip = tooltip;
   }
-  // Menu only depends on whether chatUrl is configured + unread count flips
-  // between zero / non-zero (it doesn't render the count). Skip rebuilding
-  // it for every keystroke-driven title bump.
-  const menuKey = `${settings.chatUrl ? 'connected' : 'setup'}|${unreadCount > 0 ? 'unread' : 'clear'}`;
+  // Menu only depends on whether Sign Out is enabled (i.e. whether a chat URL
+  // is configured) — it doesn't render the unread count. Skip rebuilding it
+  // for every keystroke-driven title bump.
+  const menuKey = settings.chatUrl ? 'connected' : 'setup';
   if (menuKey !== lastTrayMenuKey) {
     tray.setContextMenu(buildTrayMenu());
     lastTrayMenuKey = menuKey;
@@ -477,6 +515,7 @@ app.on('before-quit', () => {
 });
 
 app.whenReady().then(() => {
+  Menu.setApplicationMenu(buildApplicationMenu());
   createTray();
   if (settings.chatUrl) createChatWindow();
   else createSetupWindow();
