@@ -1,0 +1,75 @@
+appId: com.lifeofguenter.ex.desktop
+productName: Ex
+copyright: Copyright © 2026 Günter Grodotzki
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - dist/**/*
+  - package.json
+  - "!**/*.map"
+
+asar: true
+
+mac:
+  category: public.app-category.business
+  icon: build/icon.icns
+  target:
+    - target: dmg
+      arch: arm64
+    - target: zip
+      arch: arm64
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  notarize: true
+  artifactName: ${productName}-${version}-mac-${arch}.${ext}
+
+linux:
+  icon: build/icon.png
+  category: Network
+  target:
+    - target: AppImage
+      arch:
+        - x64
+        - arm64
+    - target: deb
+      arch:
+        - x64
+        - arm64
+  artifactName: ${productName}-${version}-linux-${arch}.${ext}
+
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+        - arm64
+    - target: zip
+      arch:
+        - x64
+        - arm64
+  artifactName: ${productName}-${version}-win-${arch}.${ext}
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+
+extraResources:
+  - from: build/icon.png
+    to: icons/icon.png
+  - from: build/icon.ico
+    to: icons/icon.ico
+  - from: build/tray.png
+    to: icons/tray.png
+  - from: build/tray@2x.png
+    to: icons/tray@2x.png
+  - from: build/trayTemplate.png
+    to: icons/trayTemplate.png
+  - from: build/trayTemplate@2x.png
+    to: icons/trayTemplate@2x.png
+  - from: assets/ex.icon
+    to: AppIcon.icon
