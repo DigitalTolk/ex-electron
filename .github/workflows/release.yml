@@ -34,17 +34,11 @@ jobs:
         with:
           node-version: '24'
           cache: npm
-      # Pin xcode-select to an Xcode 26 install so the icon pipeline can find
-      # Icon Composer / ictool deterministically. macos-26 ships multiple
-      # Xcodes; the unversioned /Applications/Xcode.app may not exist.
-      - name: Select Xcode 26 (macOS only)
-        if: runner.os == 'macOS'
-        run: |
-          ls /Applications | grep -i '^Xcode' || true
-          sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)/Contents/Developer"
-          xcodebuild -version
       - run: npm ci
       - name: Package
+        # Icons live in prebuilt/ tracked in git; we don't regenerate during
+        # the packaging step. Run `make regen-icons` locally after editing
+        # the source assets and commit the result.
         run: npm run ${{ matrix.script }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

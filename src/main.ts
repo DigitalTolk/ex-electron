@@ -48,7 +48,7 @@ let pendingAuth: { server: http.Server; authUrl: string } | null = null;
 
 const ICONS_DIR = app.isPackaged
   ? path.join(process.resourcesPath, 'icons')
-  : path.join(__dirname, '..', 'build');
+  : path.join(__dirname, '..', 'prebuilt');
 
 // macOS reads the dock/Finder icon from the app bundle (CFBundleIconName →
 // Assets.car for dynamic theming, with CFBundleIconFile → icon.icns as the

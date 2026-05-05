@@ -22,7 +22,9 @@ import pngToIco from 'png-to-ico';
 
 const ROOT = process.cwd();
 const ASSETS = path.join(ROOT, 'assets');
-const BUILD = path.join(ROOT, 'build');
+// Output directory for committed pre-built artifacts (icons, Assets.car).
+// Tracked in git — `build/` is reserved for transient compiled output.
+const BUILD = path.join(ROOT, 'prebuilt');
 
 // Resolve Icon Composer's CLI (`ictool`) via the active Xcode. Hardcoding
 // /Applications/Xcode.app fails on GitHub Actions macos runners where the
@@ -220,7 +222,7 @@ async function makeAssetsCar(): Promise<void> {
     const car = path.join(outDir, 'Assets.car');
     await fs.access(car);
     await fs.copyFile(car, path.join(BUILD, 'Assets.car'));
-    console.log('compiled ex.icon → build/Assets.car');
+    console.log('compiled ex.icon → prebuilt/Assets.car');
   } catch (err) {
     console.warn('actool failed to compile ex.icon → Assets.car:', err);
   } finally {
@@ -372,10 +374,9 @@ async function main(): Promise<void> {
   }
 
   const macPng = await makeMacIconPng();
-  await fs.writeFile(path.join(BUILD, 'icon-mac-1024.png'), macPng);
   const icns = await makeIcns(macPng);
   if (!icns && process.platform !== 'darwin') {
-    console.warn('iconutil not available — wrote icon-mac-1024.png; .icns will be skipped.');
+    console.warn('iconutil not available — .icns will be skipped (Linux/Windows CI is fine).');
   }
 
   await makeAssetsCar();

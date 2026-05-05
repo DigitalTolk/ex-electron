@@ -52,18 +52,10 @@ jobs:
         with:
           node-version: '24'
           cache: npm
-      # Make sure xcode-select points at an Xcode 26 install on the macos-26
-      # runner. Without this the unversioned /Applications/Xcode.app symlink
-      # may be missing or stale, and the icon pipeline can't find ictool.
-      - name: Select Xcode 26 (macOS only)
-        if: runner.os == 'macOS'
-        run: |
-          ls /Applications | grep -i '^Xcode' || true
-          sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)/Contents/Developer"
-          xcodebuild -version
       - run: npm ci
       - run: npm run bundle
-      - run: npm run icons
+      # Icons live in prebuilt/ tracked in git; no regeneration needed in CI.
+      # Run `make regen-icons` locally after editing assets/ex.icon.
       - name: electron-builder --dir (smoke)
         run: npx tsx scripts/build-app.ts --dir
         env:

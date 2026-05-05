@@ -3,7 +3,7 @@ productName: ex
 copyright: Copyright © 2026 DigitalTolk
 directories:
   output: release
-  buildResources: build
+  buildResources: prebuilt
 
 files:
   - dist/**/*
@@ -14,7 +14,7 @@ asar: true
 
 mac:
   category: public.app-category.business
-  icon: build/icon.icns
+  icon: prebuilt/icon.icns
   target:
     - target: dmg
       arch: arm64
@@ -30,11 +30,11 @@ mac:
   extendInfo:
     CFBundleIconName: AppIcon
   extraResources:
-    - from: build/Assets.car
+    - from: prebuilt/Assets.car
       to: Assets.car
 
 linux:
-  icon: build/icon.png
+  icon: prebuilt/icon.png
   category: Network
   # .deb requires a maintainer with an email address. fpm reads this when
   # generating Debian control metadata; without it the deb step aborts.
@@ -51,7 +51,7 @@ linux:
   artifactName: ${productName}-${version}-linux-${arch}.${ext}
 
 win:
-  icon: build/icon.ico
+  icon: prebuilt/icon.ico
   target:
     - target: nsis
       arch:
@@ -70,29 +70,29 @@ nsis:
   createStartMenuShortcut: true
 
 extraResources:
-  - from: build/icon.png
+  - from: prebuilt/icon.png
     to: icons/icon.png
-  - from: build/icon.ico
+  - from: prebuilt/icon.ico
     to: icons/icon.ico
-  - from: build/tray.png
+  - from: prebuilt/tray.png
     to: icons/tray.png
-  - from: build/tray@2x.png
+  - from: prebuilt/tray@2x.png
     to: icons/tray@2x.png
-  - from: build/trayBadged.png
+  - from: prebuilt/trayBadged.png
     to: icons/trayBadged.png
-  - from: build/trayBadged@2x.png
+  - from: prebuilt/trayBadged@2x.png
     to: icons/trayBadged@2x.png
-  - from: build/trayTemplate.png
+  - from: prebuilt/trayTemplate.png
     to: icons/trayTemplate.png
-  - from: build/trayTemplate@2x.png
+  - from: prebuilt/trayTemplate@2x.png
     to: icons/trayTemplate@2x.png
-  - from: build/trayBadgedLight.png
+  - from: prebuilt/trayBadgedLight.png
     to: icons/trayBadgedLight.png
-  - from: build/trayBadgedLight@2x.png
+  - from: prebuilt/trayBadgedLight@2x.png
     to: icons/trayBadgedLight@2x.png
-  - from: build/trayBadgedDark.png
+  - from: prebuilt/trayBadgedDark.png
     to: icons/trayBadgedDark.png
-  - from: build/trayBadgedDark@2x.png
+  - from: prebuilt/trayBadgedDark@2x.png
     to: icons/trayBadgedDark@2x.png
   - from: assets/ex.icon
     to: AppIcon.icon
