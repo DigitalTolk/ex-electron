@@ -9,6 +9,11 @@ updates:
     open-pull-requests-limit: 10
     labels:
       - dependencies
+    # Pin @types/node to the Node 24 LTS major. Dependabot will ship 24.x
+    # patch/minor updates but never propose 25.x while we're on Node 24.
+    ignore:
+      - dependency-name: "@types/node"
+        versions: [">=25"]
     groups:
       electron:
         patterns:

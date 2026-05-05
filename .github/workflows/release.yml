@@ -62,15 +62,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          # Full history so release-notes.ts can `git log` from the previous
+          # tag through the current one.
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
       - name: Download artifacts
         uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
+      - name: Generate AI release notes
+        env:
+          # Bedrock-backed Claude Sonnet 4.6 (eu-north-1). Long-term Bedrock
+          # API key — the SDK reads it directly from this env var. If it isn't
+          # set, the script falls back to a plain commit list. The model id is
+          # the cross-region inference-profile ARN; held as a secret since it
+          # contains the account number.
+          AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
+          AWS_REGION: eu-north-1
+          BEDROCK_MODEL_ID: ${{ secrets.BEDROCK_MODEL_ID }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: npx tsx scripts/release-notes.ts > release-notes.md
       - name: Create release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
-          generate_release_notes: true
+          body_path: release-notes.md
           files: artifacts/*
