@@ -21,7 +21,9 @@ jobs:
             script: dist:mac
           - os: ubuntu-latest
             script: dist:linux
-          - os: windows-latest
+          # Pinned to the VS-2026 image; `windows-latest` is being redirected
+          # to this same image by 2026-05-12 anyway.
+          - os: windows-2025-vs2026
             script: dist:win
     runs-on: ${{ matrix.os }}
     steps:
@@ -34,6 +36,9 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Package
+        # Icons live in prebuilt/ tracked in git; we don't regenerate during
+        # the packaging step. Run `make regen-icons` locally after editing
+        # the source assets and commit the result.
         run: npm run ${{ matrix.script }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
