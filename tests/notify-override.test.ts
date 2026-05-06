@@ -23,7 +23,7 @@ describe('notification icon stripper', () => {
     delete (globalThis as any).window;
   });
 
-  it('strips icon, image, and badge from notification options', () => {
+  it('strips icon, image, and badge and forces silent on notification options', () => {
     new Function(NOTIFY_OVERRIDE_SOURCE)();
     new (globalThis as any).Notification('Hello', {
       body: 'world',
@@ -33,14 +33,20 @@ describe('notification icon stripper', () => {
     });
     expect(calls).toHaveLength(1);
     expect(calls[0].title).toBe('Hello');
-    expect(calls[0].opts).toEqual({ body: 'world' });
+    expect(calls[0].opts).toEqual({ body: 'world', silent: true });
   });
 
-  it('passes through when no options are given', () => {
+  it('forces silent even when no options are given', () => {
     new Function(NOTIFY_OVERRIDE_SOURCE)();
     new (globalThis as any).Notification('Hi');
     expect(calls).toHaveLength(1);
-    expect(calls[0].opts).toBeUndefined();
+    expect(calls[0].opts).toEqual({ silent: true });
+  });
+
+  it('overrides a falsy silent option from the page', () => {
+    new Function(NOTIFY_OVERRIDE_SOURCE)();
+    new (globalThis as any).Notification('Hi', { body: 'b', silent: false } as NotificationOptions);
+    expect(calls[0].opts).toEqual({ body: 'b', silent: true });
   });
 
   it('preserves the static permission and requestPermission API', () => {
