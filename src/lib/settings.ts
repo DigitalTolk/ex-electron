@@ -18,5 +18,10 @@ export function loadSettings(file: string): Settings {
 
 export function saveSettings(file: string, settings: Settings): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(settings, null, 2), 'utf8');
+  // Write-then-rename so a crash between truncate and finish can't leave an
+  // empty settings.json (which loadSettings silently treats as "no chat URL"
+  // and drops the user back into the setup screen).
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(settings, null, 2), 'utf8');
+  fs.renameSync(tmp, file);
 }
