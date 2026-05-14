@@ -15,11 +15,11 @@ import {
 } from 'electron';
 import path from 'node:path';
 import http from 'node:http';
-import { URL } from 'node:url';
 import { loadSettings, saveSettings, type Settings } from './lib/settings';
 import { safeUrl, trimTrailingSlash, isHttpUrl } from './lib/url';
 import { parseUnreadCount } from './lib/title';
 import { overlayBadgeSvg } from './lib/overlay';
+import { AUTH_CALLBACK_HTML } from './lib/auth-callback';
 
 let isQuitting = false;
 
@@ -142,6 +142,12 @@ function createChatWindow(): void {
       contextIsolation: true,
       sandbox: true,
       nodeIntegration: false,
+      // Chromium throttles timers in hidden/occluded windows, which kills
+      // the chat SPA's WebSocket heartbeat when the dock-hidden window sits
+      // idle — the server drops the socket, inbound messages stop, and no
+      // Notification() fires. Keep the renderer running at full rate so
+      // background notifications and reconnects work.
+      backgroundThrottling: false,
       partition: 'persist:ex-chat',
     },
   });
@@ -184,10 +190,42 @@ function createChatWindow(): void {
   chatWindow.webContents.on('page-title-updated', (event, title) => {
     // The chat SPA writes "(N) channel · ex" into its <title>. We pull the
     // unread count out for the dock badge and tray, then explicitly pin our
-    // own title so the OS chrome never shows the (N) prefix.
+    // own title so the OS chrome never shows the (N) prefix. The
+    // getTitle() guard makes the setTitle a no-op after the first call,
+    // because preventDefault() means Electron doesn't apply the SPA's
+    // title and ours stays. Kept as a guard against a future Electron
+    // change to that behaviour.
     event.preventDefault();
     setUnreadCount(parseUnreadCount(title));
     if (chatWindow && chatWindow.getTitle() !== 'ex') chatWindow.setTitle('ex');
+  });
+
+  // Recover from renderer failures: a renderer crash or a transient
+  // did-fail-load (DNS hiccup, server restart) otherwise leaves a blank
+  // window with no recovery. Exponential backoff up to 30s so a hard-down
+  // server doesn't pin a CPU core in a reload loop.
+  let reloadTimer: ReturnType<typeof setTimeout> | null = null;
+  let reloadDelayMs = 1000;
+  const scheduleReload = (): void => {
+    if (reloadTimer) return;
+    reloadTimer = setTimeout(() => {
+      reloadTimer = null;
+      chatWindow?.webContents.reload();
+    }, reloadDelayMs);
+    reloadDelayMs = Math.min(reloadDelayMs * 2, 30_000);
+  };
+  chatWindow.webContents.on('did-finish-load', () => {
+    reloadDelayMs = 1000;
+  });
+  chatWindow.webContents.on('did-fail-load', (_e, code, _desc, _url, isMainFrame) => {
+    // -3 = ERR_ABORTED, fired for user-initiated nav cancels. Subframes
+    // failing to load is the chat SPA's problem, not ours.
+    if (!isMainFrame || code === -3) return;
+    scheduleReload();
+  });
+  chatWindow.webContents.on('render-process-gone', (_e, details) => {
+    if (details.reason === 'clean-exit') return;
+    scheduleReload();
   });
 
   chatWindow.on('close', (event) => {
@@ -201,6 +239,10 @@ function createChatWindow(): void {
   });
 
   chatWindow.on('closed', () => {
+    if (reloadTimer) {
+      clearTimeout(reloadTimer);
+      reloadTimer = null;
+    }
     chatWindow = null;
   });
 }
@@ -248,7 +290,15 @@ async function startDesktopAuth(): Promise<void> {
 
   pendingAuth = { server, authUrl };
 
+  let closed = false;
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
   const cleanup = (): void => {
+    if (closed) return;
+    closed = true;
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+      timeoutHandle = null;
+    }
     if (pendingAuth?.server === server) pendingAuth = null;
     server.close();
   };
@@ -261,33 +311,8 @@ async function startDesktopAuth(): Promise<void> {
       res.end('Missing desktop_code.');
       return;
     }
-    // Brand-themed callback page that asks the browser to close itself.
-    // window.close() only succeeds when the browser considers the tab
-    // script-closeable (Chrome/Edge usually allow it after this redirect
-    // chain; Safari does not). The visible message is the fallback.
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    res.end(`<!doctype html>
-<meta charset="utf-8"><title>Signed in</title>
-<style>
-  :root { --dt-black:#231F20; --dt-pink:#DE5D83; --dt-muted:#6B6466; }
-  html,body{margin:0;height:100%;}
-  body{
-    display:grid;place-items:center;background:#fff;color:var(--dt-black);
-    font:16px/1.5 "Proxima Nova","Avenir Next","Inter",
-      -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-  }
-  .card{text-align:center;max-width:360px;padding:32px;}
-  .dot{width:14px;height:14px;border-radius:50%;background:var(--dt-pink);
-    display:inline-block;margin-right:8px;vertical-align:middle;}
-  h1{font-family:"Futura","Futura PT","Avenir Next",sans-serif;font-weight:600;
-    font-size:22px;margin:0 0 8px;letter-spacing:-0.01em;}
-  p{margin:0;color:var(--dt-muted);font-size:15px;}
-</style>
-<div class="card">
-  <h1><span class="dot"></span>Signed in</h1>
-  <p>You can close this tab and return to ex.</p>
-</div>
-<script>setTimeout(function(){try{window.close();}catch(_){}}, 200);</script>`);
+    res.end(AUTH_CALLBACK_HTML);
     cleanup();
 
     if (chatWindow && settings.chatUrl) {
@@ -298,7 +323,8 @@ async function startDesktopAuth(): Promise<void> {
     }
   });
 
-  setTimeout(() => cleanup(), 10 * 60 * 1000).unref();
+  timeoutHandle = setTimeout(() => cleanup(), 10 * 60 * 1000);
+  timeoutHandle.unref();
 
   shell.openExternal(authUrl).catch((err) => {
     console.error('shell.openExternal failed:', err);
@@ -407,14 +433,26 @@ function buildApplicationMenu(): Menu {
 let lastTrayImagePath: string | null = null;
 let lastTrayTooltip: string | null = null;
 let lastTrayMenuKey: string | null = null;
+// macOS reloads the tray icon on every nativeTheme update (light/dark
+// swap); cache the decoded NativeImage so we hit the disk at most once
+// per variant for the life of the process.
+const trayImageCache = new Map<string, NativeImage>();
+
+function loadTrayImage(imgPath: string, template: boolean): NativeImage {
+  const cached = trayImageCache.get(imgPath);
+  if (cached) return cached;
+  const image = nativeImage.createFromPath(imgPath);
+  if (template) image.setTemplateImage(true);
+  const final = image.isEmpty() ? nativeImage.createEmpty() : image;
+  trayImageCache.set(imgPath, final);
+  return final;
+}
 
 function refreshTrayImage(): void {
   if (!tray) return;
   const { path: imgPath, template } = trayImageFor(unreadCount);
   if (imgPath === lastTrayImagePath) return;
-  const image = nativeImage.createFromPath(imgPath);
-  if (template) image.setTemplateImage(true);
-  tray.setImage(image.isEmpty() ? nativeImage.createEmpty() : image);
+  tray.setImage(loadTrayImage(imgPath, template));
   lastTrayImagePath = imgPath;
 }
 
@@ -438,9 +476,8 @@ function refreshTray(): void {
 
 function createTray(): void {
   const { path: imgPath, template } = trayImageFor(0);
-  const image = nativeImage.createFromPath(imgPath);
-  if (template) image.setTemplateImage(true);
-  tray = new Tray(image.isEmpty() ? nativeImage.createEmpty() : image);
+  tray = new Tray(loadTrayImage(imgPath, template));
+  lastTrayImagePath = imgPath;
   tray.on('click', () => showOrCreateChat());
   refreshTray();
   // Re-render when the user toggles dark mode, since the badged variants are
@@ -460,10 +497,17 @@ function setUnreadCount(n: number): void {
   }
 }
 
+// Counts > 99 all render as "99+", so cap the cache key. Each entry is a
+// tiny SVG NativeImage, so the cache is bounded and cheap.
+const overlayIconCache = new Map<number, NativeImage | null>();
+
 function buildOverlayIcon(count: number): NativeImage | null {
+  const key = count > 99 ? 100 : count;
+  if (overlayIconCache.has(key)) return overlayIconCache.get(key) ?? null;
   const svg = overlayBadgeSvg(count);
-  if (!svg) return null;
-  return nativeImage.createFromBuffer(Buffer.from(svg));
+  const image = svg ? nativeImage.createFromBuffer(Buffer.from(svg)) : null;
+  overlayIconCache.set(key, image);
+  return image;
 }
 
 // ---- session / sign-out ----------------------------------------------------
