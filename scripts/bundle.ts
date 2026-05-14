@@ -10,8 +10,8 @@ const root = process.cwd();
 const out = path.join(root, 'dist');
 
 async function run(): Promise<void> {
-  // Main + preloads run in Electron's Node-side processes; Electron 42 ships
-  // Node 22, so target that for accurate language-feature emit.
+  // Main + preloads run in Electron's Node-side processes; Electron 41/42
+  // both ship Node 24, so target that for accurate language-feature emit.
   await build({
     entryPoints: {
       main: path.join(root, 'src/main.ts'),
@@ -21,7 +21,7 @@ async function run(): Promise<void> {
     outdir: out,
     bundle: true,
     platform: 'node',
-    target: 'node22',
+    target: 'node24',
     format: 'cjs',
     sourcemap: false,
     external: ['electron'],
@@ -30,8 +30,9 @@ async function run(): Promise<void> {
 
   // The setup screen is a sandboxed renderer with no Node globals available;
   // build it as a browser bundle so any accidental Node-only import is a
-  // build-time error instead of a runtime ReferenceError. Electron 42 ships
-  // Chromium 136 — chrome130 leaves us conservative headroom.
+  // build-time error instead of a runtime ReferenceError. Electron 41 ships
+  // Chromium 146; target that as the floor so esbuild emits native syntax
+  // for everything that release supports.
   await build({
     entryPoints: {
       'setup/setup': path.join(root, 'src/setup/setup.ts'),
@@ -39,7 +40,7 @@ async function run(): Promise<void> {
     outdir: out,
     bundle: true,
     platform: 'browser',
-    target: 'chrome130',
+    target: 'chrome146',
     format: 'iife',
     sourcemap: false,
     logLevel: 'info',
