@@ -33,7 +33,7 @@
     "esbuild": "^0.28.1",
     "eslint": "^10.4.1",
     "png-to-ico": "^3.0.1",
-    "sharp": "^0.34.5",
+    "sharp": "^0.35.1",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.60.1",
