@@ -8,6 +8,7 @@ import {
   shell,
   nativeImage,
   nativeTheme,
+  powerMonitor,
   session,
   type ContextMenuParams,
   type MenuItemConstructorOptions,
@@ -20,6 +21,7 @@ import { safeUrl, trimTrailingSlash, isHttpUrl } from './lib/url';
 import { parseUnreadCount } from './lib/title';
 import { overlayBadgeSvg } from './lib/overlay';
 import { AUTH_CALLBACK_HTML } from './lib/auth-callback';
+import { isAuthExpiryStatus, type ConnectionState } from './lib/connection';
 
 let isQuitting = false;
 
@@ -45,6 +47,104 @@ let chatWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let unreadCount = 0;
 let pendingAuth: { server: http.Server; authUrl: string } | null = null;
+
+const CHAT_PARTITION = 'persist:ex-chat';
+
+// ---- connection / reconnect state ------------------------------------------
+//
+// The shell owns no SPA code, so it can't see the chat app's own WebSocket.
+// Instead we infer connection health from signals the main process *can* see —
+// page-load failures, renderer crashes, OS power resume, renderer online/
+// offline events, and HTTP 401/419 from the chat API — and drive a banner the
+// chat preload injects over the SPA. The only reliable reconnect a thin shell
+// has is to reload the chat window; we do that with exponential backoff so a
+// hard-down server doesn't pin a CPU core in a reload loop.
+let connectionState: ConnectionState = 'connected';
+let reloadTimer: ReturnType<typeof setTimeout> | null = null;
+let reloadDelayMs = 1000;
+
+function setConnectionState(next: ConnectionState): void {
+  if (next === connectionState) return;
+  connectionState = next;
+  if (chatWindow && !chatWindow.isDestroyed()) {
+    chatWindow.webContents.send('connection:state', next);
+  }
+}
+
+// The transient states a successful load can clear and a connectivity-return can
+// kick a reconnect from — i.e. everything except 'connected' (nothing to do) and
+// 'auth-expired' (needs a sign-in, not a reload).
+function isReconnectableState(state: ConnectionState): boolean {
+  return state === 'offline' || state === 'reconnecting';
+}
+
+function clearReloadTimer(): void {
+  if (reloadTimer) {
+    clearTimeout(reloadTimer);
+    reloadTimer = null;
+  }
+}
+
+// Reset the reconnect machinery to its idle baseline: no pending reload, backoff
+// rewound, banner cleared. Used when a window is (re)created or torn down.
+function resetReconnectState(): void {
+  clearReloadTimer();
+  reloadDelayMs = 1000;
+  connectionState = 'connected';
+}
+
+function scheduleReload(): void {
+  if (reloadTimer || !chatWindow) return;
+  reloadTimer = setTimeout(() => {
+    reloadTimer = null;
+    chatWindow?.webContents.reload();
+  }, reloadDelayMs);
+  reloadDelayMs = Math.min(reloadDelayMs * 2, 30_000);
+}
+
+// A renderer crash or main-frame load failure: show "Reconnecting…" and retry
+// with backoff.
+function recoverFromFailure(): void {
+  setConnectionState('reconnecting');
+  scheduleReload();
+}
+
+// Force an immediate reconnect, bypassing the backoff timer — used when we have
+// a strong signal that the socket is stale (power resume) or that connectivity
+// just returned. Reloading is destructive to unsent drafts, so it's reserved
+// for these high-confidence cases rather than every transient blip.
+function reconnectNow(): void {
+  if (!chatWindow) return;
+  clearReloadTimer();
+  reloadDelayMs = 1000;
+  setConnectionState('reconnecting');
+  chatWindow.webContents.reload();
+}
+
+// Watch the chat session's API responses for auth-expiry status codes. A 401/
+// 419 on an XHR/fetch means the saved session is dead even though the page is
+// still "loaded", which is exactly the case the old load-failure recovery
+// missed. We surface it as a banner with a Sign in button rather than silently
+// launching the SSO browser, so the re-auth is never a surprise. Navigations to
+// the /auth/* endpoints are skipped — they're part of the login flow itself.
+//
+// onCompleted holds a single listener, so re-registering here (e.g. after a
+// server change) just rebinds the filter to the current origin.
+function attachAuthWatch(): void {
+  if (!settings.chatUrl) return;
+  const origin = new URL(settings.chatUrl).origin;
+  session
+    .fromPartition(CHAT_PARTITION)
+    .webRequest.onCompleted({ urls: [`${origin}/*`] }, (details) => {
+      // Electron reports both XMLHttpRequest and fetch() as 'xhr'; that's the
+      // SPA's API traffic. Ignore navigations, assets, and the WebSocket.
+      if (details.resourceType !== 'xhr') return;
+      if (!isAuthExpiryStatus(details.statusCode)) return;
+      const reqUrl = safeUrl(details.url);
+      if (reqUrl?.pathname.startsWith('/auth/')) return;
+      setConnectionState('auth-expired');
+    });
+}
 
 const ICONS_DIR = app.isPackaged
   ? path.join(process.resourcesPath, 'icons')
@@ -113,6 +213,8 @@ function createSetupWindow(): void {
 
 function createChatWindow(): void {
   if (!settings.chatUrl) return;
+  // Fresh window starts from a clean connection slate.
+  resetReconnectState();
   chatWindow = new BrowserWindow({
     width: 1280,
     height: 820,
@@ -148,7 +250,7 @@ function createChatWindow(): void {
       // Notification() fires. Keep the renderer running at full rate so
       // background notifications and reconnects work.
       backgroundThrottling: false,
-      partition: 'persist:ex-chat',
+      partition: CHAT_PARTITION,
     },
   });
 
@@ -200,32 +302,29 @@ function createChatWindow(): void {
     if (chatWindow && chatWindow.getTitle() !== 'ex') chatWindow.setTitle('ex');
   });
 
+  attachAuthWatch();
+
   // Recover from renderer failures: a renderer crash or a transient
   // did-fail-load (DNS hiccup, server restart) otherwise leaves a blank
-  // window with no recovery. Exponential backoff up to 30s so a hard-down
-  // server doesn't pin a CPU core in a reload loop.
-  let reloadTimer: ReturnType<typeof setTimeout> | null = null;
-  let reloadDelayMs = 1000;
-  const scheduleReload = (): void => {
-    if (reloadTimer) return;
-    reloadTimer = setTimeout(() => {
-      reloadTimer = null;
-      chatWindow?.webContents.reload();
-    }, reloadDelayMs);
-    reloadDelayMs = Math.min(reloadDelayMs * 2, 30_000);
-  };
+  // window with no recovery. The reconnect helpers (module scope) handle the
+  // exponential backoff; here we just map each event onto a state + a retry.
   chatWindow.webContents.on('did-finish-load', () => {
     reloadDelayMs = 1000;
+    // A successful load clears any transient connectivity banner. Leave an
+    // auth-expired banner alone — only a fresh, authenticated session (which
+    // we can't confirm from here) should clear it, and the webRequest watcher
+    // will re-flag it on the next 401 if it's still expired.
+    if (isReconnectableState(connectionState)) setConnectionState('connected');
   });
   chatWindow.webContents.on('did-fail-load', (_e, code, _desc, _url, isMainFrame) => {
     // -3 = ERR_ABORTED, fired for user-initiated nav cancels. Subframes
     // failing to load is the chat SPA's problem, not ours.
     if (!isMainFrame || code === -3) return;
-    scheduleReload();
+    recoverFromFailure();
   });
   chatWindow.webContents.on('render-process-gone', (_e, details) => {
     if (details.reason === 'clean-exit') return;
-    scheduleReload();
+    recoverFromFailure();
   });
 
   chatWindow.on('close', (event) => {
@@ -239,10 +338,7 @@ function createChatWindow(): void {
   });
 
   chatWindow.on('closed', () => {
-    if (reloadTimer) {
-      clearTimeout(reloadTimer);
-      reloadTimer = null;
-    }
+    resetReconnectState();
     chatWindow = null;
   });
 }
@@ -317,6 +413,9 @@ async function startDesktopAuth(): Promise<void> {
 
     if (chatWindow && settings.chatUrl) {
       const completeUrl = `${trimTrailingSlash(settings.chatUrl)}/auth/desktop/complete?code=${encodeURIComponent(code)}`;
+      // Drop the "session expired" banner while we complete sign-in; a
+      // successful load flips it back to connected, a later 401 re-flags it.
+      setConnectionState('reconnecting');
       chatWindow.loadURL(completeUrl);
       chatWindow.show();
       chatWindow.focus();
@@ -514,7 +613,7 @@ function buildOverlayIcon(count: number): NativeImage | null {
 
 async function signOut(): Promise<void> {
   if (!settings.chatUrl) return;
-  const ses = session.fromPartition('persist:ex-chat');
+  const ses = session.fromPartition(CHAT_PARTITION);
   try {
     await ses.clearStorageData({
       storages: ['cookies', 'localstorage', 'indexdb', 'serviceworkers', 'cachestorage'],
@@ -523,6 +622,9 @@ async function signOut(): Promise<void> {
     console.error('clearStorageData failed:', err);
   }
   setUnreadCount(0);
+  // A deliberate sign-out isn't an error state — drop any banner and let the
+  // SPA render its own login screen.
+  setConnectionState('connected');
   if (chatWindow) chatWindow.loadURL(settings.chatUrl);
 }
 
@@ -551,6 +653,33 @@ ipcMain.handle('settings:saveChatUrl', (_event, url: unknown): boolean => {
   return true;
 });
 
+// Connection signals from the chat preload's isolated world. Guard on the
+// sender so only the chat window can drive reconnect/sign-in — these channels
+// are never exposed to the untrusted page, but the guard keeps the setup window
+// (or a stray renderer) from triggering them too.
+function fromChatWindow(event: Electron.IpcMainEvent): boolean {
+  return !!chatWindow && !chatWindow.isDestroyed() && event.sender === chatWindow.webContents;
+}
+
+ipcMain.on('connection:offline', (event) => {
+  if (!fromChatWindow(event)) return;
+  // No point retrying while the OS says there's no network; wait for 'online'.
+  clearReloadTimer();
+  setConnectionState('offline');
+});
+
+ipcMain.on('connection:online', (event) => {
+  if (!fromChatWindow(event)) return;
+  // Connectivity returned after a loss — force a fresh load so the SPA opens a
+  // new WebSocket instead of waiting on its own (often slow) backoff.
+  if (isReconnectableState(connectionState)) reconnectNow();
+});
+
+ipcMain.on('connection:signin', (event) => {
+  if (!fromChatWindow(event)) return;
+  startDesktopAuth().catch((err) => console.error('desktop auth failed:', err));
+});
+
 app.on('second-instance', () => {
   if (chatWindow) {
     if (chatWindow.isMinimized()) chatWindow.restore();
@@ -572,6 +701,14 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+});
+
+// Waking from sleep is the most common way the chat WebSocket dies silently:
+// the OS was suspended, the socket timed out server-side, but navigator.onLine
+// never flipped so no online/offline event fires and the page still looks
+// "loaded". Force a reconnect on resume to recover it.
+powerMonitor.on('resume', () => {
+  if (chatWindow && connectionState !== 'auth-expired') reconnectNow();
 });
 
 app.whenReady().then(() => {
