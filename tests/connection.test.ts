@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  AUTH_EXPIRY_THRESHOLD,
+  authStateForXhr,
   bannerContent,
   CONNECTION_BANNER_ID,
   createConnectionBanner,
@@ -41,6 +43,105 @@ describe('isAuthExpiryStatus', () => {
   it('ignores success and other failures', () => {
     for (const code of [200, 204, 302, 400, 403, 404, 429, 500]) {
       expect(isAuthExpiryStatus(code)).toBe(false);
+    }
+  });
+});
+
+describe('authStateForXhr', () => {
+  // Replay a sequence of [status, pathname] responses through the reducer,
+  // threading the failure counter the way main.ts does, and return the final
+  // outcome plus the connection state arrived at.
+  function replay(
+    responses: Array<[number, string]>,
+    start: ConnectionState = 'connected',
+  ): { state: ConnectionState; failures: number } {
+    let state = start;
+    let failures = 0;
+    for (const [status, pathname] of responses) {
+      const outcome = authStateForXhr(state, failures, status, pathname);
+      failures = outcome.failures;
+      if (outcome.state) state = outcome.state;
+    }
+    return { state, failures };
+  }
+
+  it('does not raise the banner before the threshold is reached', () => {
+    expect(authStateForXhr('connected', 0, 401, '/api/messages')).toEqual({
+      state: null,
+      failures: 1,
+    });
+    expect(authStateForXhr('connected', 1, 419, '/api/messages')).toEqual({
+      state: null,
+      failures: 2,
+    });
+  });
+
+  it('raises auth-expired only once AUTH_EXPIRY_THRESHOLD failures accumulate', () => {
+    const burst: Array<[number, string]> = Array(AUTH_EXPIRY_THRESHOLD).fill([401, '/api/messages']);
+    expect(replay(burst)).toEqual({ state: 'auth-expired', failures: AUTH_EXPIRY_THRESHOLD });
+  });
+
+  it('does not latch on a lone 401: a success before the threshold resets the streak', () => {
+    const { state, failures } = replay([
+      [401, '/api/messages'],
+      [200, '/api/messages'],
+      [401, '/api/messages'],
+    ]);
+    expect(state).toBe('connected');
+    expect(failures).toBe(1);
+  });
+
+  it('clears the banner when a 2xx proves the session recovered', () => {
+    expect(authStateForXhr('auth-expired', AUTH_EXPIRY_THRESHOLD, 200, '/api/messages')).toEqual({
+      state: 'connected',
+      failures: 0,
+    });
+    expect(authStateForXhr('auth-expired', AUTH_EXPIRY_THRESHOLD, 204, '/api/messages')).toEqual({
+      state: 'connected',
+      failures: 0,
+    });
+  });
+
+  it('leaves state unchanged on a 2xx when not currently auth-expired', () => {
+    expect(authStateForXhr('connected', 0, 200, '/api/messages')).toEqual({
+      state: null,
+      failures: 0,
+    });
+    expect(authStateForXhr('reconnecting', 0, 200, '/api/messages')).toEqual({
+      state: null,
+      failures: 0,
+    });
+  });
+
+  it('does not let a 2xx clear connectivity states', () => {
+    // Only auth-expired is cleared by a success; offline/reconnecting are owned
+    // by the load/online handlers, not the auth watch.
+    expect(authStateForXhr('reconnecting', 0, 200, '/api/messages').state).toBeNull();
+    expect(authStateForXhr('offline', 0, 200, '/api/messages').state).toBeNull();
+  });
+
+  it('ignores the /auth/ login flow entirely, leaving the counter untouched', () => {
+    expect(authStateForXhr('connected', 2, 401, '/auth/oidc/login')).toEqual({
+      state: null,
+      failures: 2,
+    });
+    expect(authStateForXhr('auth-expired', 0, 200, '/auth/desktop/complete')).toEqual({
+      state: null,
+      failures: 0,
+    });
+  });
+
+  it('ignores non-expiry failures: they neither count nor reset the streak', () => {
+    for (const code of [403, 404, 429, 500]) {
+      expect(authStateForXhr('connected', 2, code, '/api/messages')).toEqual({
+        state: null,
+        failures: 2,
+      });
+      // ...and such a failure never spuriously clears an existing banner.
+      expect(authStateForXhr('auth-expired', 5, code, '/api/messages')).toEqual({
+        state: null,
+        failures: 5,
+      });
     }
   });
 });

@@ -10,7 +10,13 @@
 import { execFileSync } from 'node:child_process';
 import { AnthropicBedrock } from '@anthropic-ai/bedrock-sdk';
 
-const DEFAULT_BEDROCK_MODEL = 'anthropic.claude-sonnet-4-6';
+// Sonnet 4.5+ on Bedrock can't be invoked by its bare base ID
+// (`anthropic.claude-sonnet-4-6`) — that's only a ValidationException away. It
+// must carry a cross-region inference-profile prefix: `global.` (dynamic
+// routing, no premium, works from any region) or a regional one like `eu.`
+// (10% premium, data-residency). We default to global; override per deployment
+// with BEDROCK_MODEL_ID.
+const DEFAULT_BEDROCK_MODEL = 'global.anthropic.claude-sonnet-4-6';
 const DEFAULT_AWS_REGION = 'eu-north-1';
 
 function git(args: string[]): string {
@@ -70,13 +76,21 @@ ${commits}`;
       max_tokens: 1500,
       messages: [{ role: 'user', content: prompt }],
     });
+    // A well-formed Message always carries a content array. If it doesn't, log
+    // what Bedrock actually returned rather than dying on an opaque
+    // "reading 'flatMap'" TypeError that hides the real response.
+    if (!Array.isArray(response?.content)) {
+      console.error('bedrock returned no content array:', JSON.stringify(response)?.slice(0, 1000));
+      return null;
+    }
     const text = response.content
       .flatMap((b) => (b.type === 'text' ? [b.text] : []))
       .join('')
       .trim();
     return text.length > 0 ? text : null;
   } catch (err) {
-    console.error('bedrock call failed:', err instanceof Error ? err.message : err);
+    // Log the whole error (status/type for API errors), not just .message.
+    console.error('bedrock call failed:', err);
     return null;
   }
 }
