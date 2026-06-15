@@ -46,6 +46,52 @@ export function isAuthExpiryStatus(status: number): boolean {
   return status === 401 || status === 419;
 }
 
+// How many consecutive auth-expiry responses we tolerate before raising the
+// banner. A lone 401/419 is usually a transient blip — a request caught mid
+// token-refresh, a request fired during a connectivity drop, or a server hiccup
+// during a deploy — and the SPA's own retry recovers it. Only a session that's
+// genuinely dead keeps failing, and because the SPA retries, those failures pile
+// up quickly and cross this threshold within a second or two.
+export const AUTH_EXPIRY_THRESHOLD = 3;
+
+export interface AuthXhrOutcome {
+  // The state to transition to, or null to leave the connection state as-is.
+  state: ConnectionState | null;
+  // The consecutive-auth-failure count to carry into the next call.
+  failures: number;
+}
+
+// Decide what a single completed chat-origin XHR means for auth. The shell can't
+// see the SPA's session directly, so it infers it from API responses, with a
+// consecutive-failure counter threaded through (`failures`):
+//   - 401/419 on a normal request → bump the streak; raise 'auth-expired' only
+//     once it reaches AUTH_EXPIRY_THRESHOLD, so a single blip never surfaces it.
+//   - a 2xx on a normal request → the session is alive: reset the streak, and
+//     clear the banner if it was up (the 401s were transient after all). Without
+//     this, a dead-looking-then-recovered session would latch "Your session has
+//     expired" forever even though everything keeps working.
+//   - any other status (403/404/429/500) says nothing about auth: leave both the
+//     state and the streak untouched.
+// Requests to /auth/* are ignored entirely — they're the login flow itself.
+// Connectivity states (offline/reconnecting) are owned by the load/online
+// handlers; a 2xx here only clears auth-expired, never those.
+export function authStateForXhr(
+  current: ConnectionState,
+  failures: number,
+  status: number,
+  pathname: string,
+): AuthXhrOutcome {
+  if (pathname.startsWith('/auth/')) return { state: null, failures };
+  if (isAuthExpiryStatus(status)) {
+    const next = failures + 1;
+    return { state: next >= AUTH_EXPIRY_THRESHOLD ? 'auth-expired' : null, failures: next };
+  }
+  if (status >= 200 && status < 300) {
+    return { state: current === 'auth-expired' ? 'connected' : null, failures: 0 };
+  }
+  return { state: null, failures };
+}
+
 export const CONNECTION_BANNER_ID = 'ex-connection-banner';
 
 // Injected via webFrame.insertCSS from the chat preload. Scoped to our id and

@@ -21,7 +21,7 @@ import { safeUrl, trimTrailingSlash, isHttpUrl } from './lib/url';
 import { parseUnreadCount } from './lib/title';
 import { overlayBadgeSvg } from './lib/overlay';
 import { AUTH_CALLBACK_HTML } from './lib/auth-callback';
-import { isAuthExpiryStatus, type ConnectionState } from './lib/connection';
+import { authStateForXhr, type ConnectionState } from './lib/connection';
 
 let isQuitting = false;
 
@@ -62,6 +62,9 @@ const CHAT_PARTITION = 'persist:ex-chat';
 let connectionState: ConnectionState = 'connected';
 let reloadTimer: ReturnType<typeof setTimeout> | null = null;
 let reloadDelayMs = 1000;
+// Consecutive auth-expiry (401/419) responses seen on the chat API. The banner
+// only fires once this crosses AUTH_EXPIRY_THRESHOLD; any success resets it.
+let consecutiveAuthFailures = 0;
 
 function setConnectionState(next: ConnectionState): void {
   if (next === connectionState) return;
@@ -91,6 +94,7 @@ function resetReconnectState(): void {
   clearReloadTimer();
   reloadDelayMs = 1000;
   connectionState = 'connected';
+  consecutiveAuthFailures = 0;
 }
 
 function scheduleReload(): void {
@@ -121,12 +125,15 @@ function reconnectNow(): void {
   chatWindow.webContents.reload();
 }
 
-// Watch the chat session's API responses for auth-expiry status codes. A 401/
-// 419 on an XHR/fetch means the saved session is dead even though the page is
-// still "loaded", which is exactly the case the old load-failure recovery
-// missed. We surface it as a banner with a Sign in button rather than silently
-// launching the SSO browser, so the re-auth is never a surprise. Navigations to
-// the /auth/* endpoints are skipped — they're part of the login flow itself.
+// Watch the chat session's API responses to track auth state. Repeated 401/419s
+// on XHR/fetch mean the saved session is dead even though the page is still
+// "loaded", which is exactly the case the old load-failure recovery missed. We
+// surface it as a banner with a Sign in button rather than silently launching
+// the SSO browser, so the re-auth is never a surprise. Conversely, a later 2xx
+// proves the session recovered, so we clear the banner — otherwise a stray
+// 401/419 would latch it forever. authStateForXhr owns both decisions plus the
+// consecutive-failure threshold (so a lone blip never raises the banner) and
+// ignoring the /auth/* login flow; we just thread the failure counter through.
 //
 // onCompleted holds a single listener, so re-registering here (e.g. after a
 // server change) just rebinds the filter to the current origin.
@@ -139,10 +146,16 @@ function attachAuthWatch(): void {
       // Electron reports both XMLHttpRequest and fetch() as 'xhr'; that's the
       // SPA's API traffic. Ignore navigations, assets, and the WebSocket.
       if (details.resourceType !== 'xhr') return;
-      if (!isAuthExpiryStatus(details.statusCode)) return;
       const reqUrl = safeUrl(details.url);
-      if (reqUrl?.pathname.startsWith('/auth/')) return;
-      setConnectionState('auth-expired');
+      if (!reqUrl) return;
+      const outcome = authStateForXhr(
+        connectionState,
+        consecutiveAuthFailures,
+        details.statusCode,
+        reqUrl.pathname,
+      );
+      consecutiveAuthFailures = outcome.failures;
+      if (outcome.state) setConnectionState(outcome.state);
     });
 }
 
