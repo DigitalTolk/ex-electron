@@ -14,6 +14,15 @@ export function isHttpUrl(u: URL): boolean {
   return u.protocol === 'http:' || u.protocol === 'https:';
 }
 
+// True when `target` points at the same host as the configured chat server —
+// i.e. it's an in-app link (a channel or message permalink shared in chat)
+// that should stay in the desktop window, not a foreign URL bound for the
+// system browser. Returns false if the chat URL can't be parsed.
+export function isSameHost(target: URL, chatUrl: string): boolean {
+  const chat = safeUrl(chatUrl);
+  return !!chat && target.host === chat.host;
+}
+
 export function normalizeChatUrl(raw: string): string | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
