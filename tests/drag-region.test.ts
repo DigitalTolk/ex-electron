@@ -27,8 +27,16 @@ function appRegionFor(selector: string): string | undefined {
 }
 
 describe('chat drag region css', () => {
-  it('marks header as a window drag region', () => {
-    expect(appRegionFor('header')).toBe('drag');
+  it('marks the app-chrome title bar as a window drag region', () => {
+    expect(appRegionFor('[data-app-chrome="true"]')).toBe('drag');
+  });
+
+  it('does NOT mark plain <header> elements as a drag region', () => {
+    // A blanket `header { -webkit-app-region: drag }` rule swallows wheel
+    // events over every <header> the SPA renders (thread cards, channel
+    // headers, the thread panel), leaving the page stuck when the cursor
+    // sits over them. Only the real title bar should drag.
+    expect(appRegionFor('header')).toBeUndefined();
   });
 
   it('opts common interactive controls out of the drag region', () => {

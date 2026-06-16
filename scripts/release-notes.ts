@@ -19,6 +19,17 @@ import { AnthropicBedrock } from '@anthropic-ai/bedrock-sdk';
 const DEFAULT_BEDROCK_MODEL = 'global.anthropic.claude-sonnet-4-6';
 const DEFAULT_AWS_REGION = 'eu-north-1';
 
+// Resolve env overrides with EMPTY-aware fallback. `??` only catches
+// null/undefined, so an env var set to an empty/whitespace string (e.g. a
+// GitHub secret that exists but has no value) would slip through as "" — and an
+// empty model id makes the Bedrock SDK POST to `…/model//invoke`, which the
+// service rejects with a Coral UnknownOperationException rather than a clear
+// "bad model" error. Treat blank as unset.
+function envOr(value: string | undefined, fallback: string): string {
+  const trimmed = value?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : fallback;
+}
+
 function git(args: string[]): string {
   return execFileSync('git', args, { encoding: 'utf8' }).trim();
 }
@@ -68,11 +79,18 @@ Commits since previous tag:
 ${commits}`;
 
   try {
-    const client = new AnthropicBedrock({
-      awsRegion: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? DEFAULT_AWS_REGION,
-    });
+    const awsRegion = envOr(process.env.AWS_REGION, envOr(process.env.AWS_DEFAULT_REGION, DEFAULT_AWS_REGION));
+    const model = envOr(process.env.BEDROCK_MODEL_ID, DEFAULT_BEDROCK_MODEL);
+    // Diagnostic without echoing secret-sourced values. We never log the model id
+    // itself (it comes from the BEDROCK_MODEL_ID secret) or the bearer token —
+    // only whether the secret was populated. modelSource=default is the tell for
+    // a blank/whitespace BEDROCK_MODEL_ID secret, which is what produces the
+    // empty-model UnknownOperationException. Region isn't a secret.
+    const modelSource = envOr(process.env.BEDROCK_MODEL_ID, '') ? 'secret' : 'default';
+    console.error(`bedrock: invoking (modelSource=${modelSource}, region=${awsRegion})`);
+    const client = new AnthropicBedrock({ awsRegion });
     const response = await client.messages.create({
-      model: process.env.BEDROCK_MODEL_ID ?? DEFAULT_BEDROCK_MODEL,
+      model,
       max_tokens: 1500,
       messages: [{ role: 'user', content: prompt }],
     });

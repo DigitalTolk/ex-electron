@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isHttpUrl, normalizeChatUrl, safeUrl, trimTrailingSlash } from '../src/lib/url';
+import { isHttpUrl, isSameHost, normalizeChatUrl, safeUrl, trimTrailingSlash } from '../src/lib/url';
 
 describe('safeUrl', () => {
   it('returns a URL for valid input', () => {
@@ -36,6 +36,31 @@ describe('isHttpUrl', () => {
     expect(isHttpUrl(new URL('file:///etc/passwd'))).toBe(false);
     expect(isHttpUrl(new URL('javascript:void(0)'))).toBe(false);
     expect(isHttpUrl(new URL('ftp://x.com'))).toBe(false);
+  });
+});
+
+describe('isSameHost', () => {
+  const chatUrl = 'https://ex.digitaltolk.net';
+
+  it('matches a message permalink on the chat host', () => {
+    const target = new URL('https://ex.digitaltolk.net/channel/service-status#msg-01KV8DRDNYPP32W24ZY7DDP7CY');
+    expect(isSameHost(target, chatUrl)).toBe(true);
+  });
+
+  it('matches regardless of scheme or path differences', () => {
+    expect(isSameHost(new URL('http://ex.digitaltolk.net/x'), chatUrl)).toBe(true);
+  });
+
+  it('rejects a foreign host', () => {
+    expect(isSameHost(new URL('https://evil.example.com/x'), chatUrl)).toBe(false);
+  });
+
+  it('treats a different port as a different host', () => {
+    expect(isSameHost(new URL('https://ex.digitaltolk.net:8443/x'), chatUrl)).toBe(false);
+  });
+
+  it('returns false when the chat URL is unparseable', () => {
+    expect(isSameHost(new URL('https://ex.digitaltolk.net/x'), 'not a url')).toBe(false);
   });
 });
 

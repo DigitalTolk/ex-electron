@@ -17,7 +17,7 @@ import {
 import path from 'node:path';
 import http from 'node:http';
 import { loadSettings, saveSettings, type Settings } from './lib/settings';
-import { safeUrl, trimTrailingSlash, isHttpUrl } from './lib/url';
+import { safeUrl, trimTrailingSlash, isHttpUrl, isSameHost } from './lib/url';
 import { parseUnreadCount } from './lib/title';
 import { overlayBadgeSvg } from './lib/overlay';
 import { AUTH_CALLBACK_HTML } from './lib/auth-callback';
@@ -270,6 +270,15 @@ function createChatWindow(): void {
   chatWindow.loadURL(settings.chatUrl);
 
   chatWindow.webContents.setWindowOpenHandler(({ url }) => {
+    const target = safeUrl(url);
+    // Same-host links (a channel or message permalink shared in chat, often
+    // rendered as target="_blank") belong in the app, not a browser tab — load
+    // them in the existing window so the SPA routes to the message. Everything
+    // else opens in the system browser.
+    if (target && settings.chatUrl && isSameHost(target, settings.chatUrl)) {
+      chatWindow?.loadURL(url).catch(() => {});
+      return { action: 'deny' };
+    }
     shell.openExternal(url).catch(() => {});
     return { action: 'deny' };
   });
@@ -277,19 +286,19 @@ function createChatWindow(): void {
   chatWindow.webContents.on('will-navigate', (event, url) => {
     const target = safeUrl(url);
     if (!target || !settings.chatUrl) return;
-    const chatHost = new URL(settings.chatUrl).host;
+    const sameHost = isSameHost(target, settings.chatUrl);
 
     // Intercept any in-window jump to the SSO start URL and route it through
     // the system browser using the desktop_code flow instead. SSO providers
     // generally refuse embedded webviews, and this gives the user a real
     // password-manager-friendly login page.
-    if (target.host === chatHost && target.pathname === '/auth/oidc/login') {
+    if (sameHost && target.pathname === '/auth/oidc/login') {
       event.preventDefault();
       startDesktopAuth().catch((err) => console.error('desktop auth failed:', err));
       return;
     }
 
-    if (target.host !== chatHost) {
+    if (!sameHost) {
       event.preventDefault();
       shell.openExternal(target.toString()).catch(() => {});
     }
