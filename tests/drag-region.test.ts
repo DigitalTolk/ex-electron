@@ -31,6 +31,14 @@ describe('chat drag region css', () => {
     expect(appRegionFor('[data-app-chrome="true"]')).toBe('drag');
   });
 
+  it('opts every descendant of the app-chrome bar out of the drag region', () => {
+    // -webkit-app-region: drag is inherited and swallows wheel events. When the
+    // chrome bar wraps scrollable content (the sidebar), non-interactive gaps
+    // between channels/categories inherit drag and become unscrollable. Opting
+    // all descendants out keeps only the bar's own empty area draggable.
+    expect(appRegionFor('[data-app-chrome="true"] *')).toBe('no-drag');
+  });
+
   it('does NOT mark plain <header> elements as a drag region', () => {
     // A blanket `header { -webkit-app-region: drag }` rule swallows wheel
     // events over every <header> the SPA renders (thread cards, channel
