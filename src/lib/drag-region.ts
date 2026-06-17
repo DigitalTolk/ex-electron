@@ -12,9 +12,20 @@
 // headers, the thread panel). A drag region swallows wheel events, so a
 // blanket rule left the page stuck whenever the cursor sat over any of
 // those headers — only the real title bar should drag.
+//
+// -webkit-app-region: drag is also inherited by descendants, and a drag
+// region swallows wheel events. When the chrome bar wraps scrollable content
+// (the sidebar with its categories/channels), the gaps between rows inherit
+// drag and become unscrollable — interactive rows still work because they
+// match the no-drag selectors, but the empty space between them does not. So
+// `[data-app-chrome="true"] *` opts every descendant back out: only the bar's
+// own empty area drags, everything inside it stays clickable and scrollable.
 export const CHAT_DRAG_REGION_CSS = `
   [data-app-chrome="true"] {
     -webkit-app-region: drag;
+  }
+  [data-app-chrome="true"] * {
+    -webkit-app-region: no-drag;
   }
   input, textarea, select, button, a,
   [role="button"], [role="link"], [role="textbox"], [role="searchbox"], [role="combobox"], [role="menuitem"], [role="tab"],
