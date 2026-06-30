@@ -31,7 +31,7 @@
     "electron": "^42.5.0",
     "electron-builder": "^26.15.3",
     "esbuild": "^0.28.1",
-    "eslint": "^10.5.0",
+    "eslint": "^10.6.0",
     "png-to-ico": "^3.0.1",
     "sharp": "^0.35.2",
     "tsx": "^4.22.4",
