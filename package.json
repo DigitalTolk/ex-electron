@@ -24,7 +24,7 @@
     "dist:all": "npm run build && tsx scripts/build-app.ts --mac --arm64 --linux --x64 --arm64 --win --x64 --arm64"
   },
   "devDependencies": {
-    "@anthropic-ai/bedrock-sdk": "^0.31.0",
+    "@anthropic-ai/bedrock-sdk": "^0.32.0",
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.13.2",
     "@vitest/coverage-v8": "^4.1.9",
