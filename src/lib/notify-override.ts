@@ -1,3 +1,10 @@
+// DOM event the page-side wrapper dispatches when the user clicks a desktop
+// notification. The chat preload (isolated world, shared DOM) listens for it
+// and asks the main process to raise the window — the SPA's own onclick
+// handler calls window.focus(), which a renderer cannot rely on to restore or
+// raise a backgrounded BrowserWindow on Windows/Linux.
+export const NOTIFICATION_ACTIVATED_EVENT = 'ex:notification-activated';
+
 // Source for the page-side script that strips icon/image/badge from
 // notifications opened by the chat host, so the OS falls back to the app icon.
 // Also forces silent:true so the OS does not play a sound — the chat already
@@ -14,7 +21,20 @@ export const NOTIFY_OVERRIDE_SOURCE = `(() => {
     return o;
   }
   function Wrapped(title, opts) {
-    return new Original(title, strip(opts));
+    const n = new Original(title, strip(opts));
+    // Signal notification clicks across the world boundary so the preload can
+    // have the main process restore/raise the window; the page's own onclick
+    // (deep-link navigation) still runs — this is an additional listener.
+    if (n && typeof n.addEventListener === 'function') {
+      n.addEventListener('click', () => {
+        try {
+          document.dispatchEvent(new Event('${NOTIFICATION_ACTIVATED_EVENT}'));
+        } catch {
+          // A torn-down document can't be signalled; the click still ran.
+        }
+      });
+    }
+    return n;
   }
   Wrapped.prototype = Original.prototype;
   Wrapped.__exWrapped = true;

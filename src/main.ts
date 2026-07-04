@@ -533,7 +533,18 @@ function buildApplicationMenu(): Menu {
 
   template.push(
     { role: 'editMenu' },
-    { role: 'viewMenu' },
+    // Custom View menu mirrors the stock `viewMenu` role minus the zoom items
+    // (Actual Size / Zoom In / Zoom Out), which we don't want exposed.
+    {
+      label: 'View',
+      submenu: [
+        { role: 'reload' },
+        { role: 'forceReload' },
+        { role: 'toggleDevTools' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+      ],
+    },
     { role: 'windowMenu' },
   );
   return Menu.buildFromTemplate(template);
@@ -692,6 +703,17 @@ ipcMain.on('connection:online', (event) => {
 ipcMain.on('connection:signin', (event) => {
   if (!fromChatWindow(event)) return;
   startDesktopAuth().catch((err) => console.error('desktop auth failed:', err));
+});
+
+ipcMain.on('notification:activated', (event) => {
+  if (!fromChatWindow(event) || !chatWindow) return;
+  // The user clicked a desktop notification: raise the window. The SPA's own
+  // notification onclick handles the deep-link navigation in-page; renderer
+  // window.focus() alone can't restore/raise a backgrounded BrowserWindow on
+  // Windows/Linux, so main does it.
+  if (chatWindow.isMinimized()) chatWindow.restore();
+  chatWindow.show();
+  chatWindow.focus();
 });
 
 app.on('second-instance', () => {

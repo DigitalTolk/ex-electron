@@ -1,5 +1,5 @@
 import { ipcRenderer, webFrame } from 'electron';
-import { NOTIFY_OVERRIDE_SOURCE } from './lib/notify-override';
+import { NOTIFICATION_ACTIVATED_EVENT, NOTIFY_OVERRIDE_SOURCE } from './lib/notify-override';
 import { CHAT_DRAG_REGION_CSS } from './lib/drag-region';
 import {
   CONNECTION_BANNER_CSS,
@@ -17,6 +17,16 @@ webFrame.executeJavaScript(NOTIFY_OVERRIDE_SOURCE).catch((err) => {
 
 webFrame.insertCSS(CHAT_DRAG_REGION_CSS);
 webFrame.insertCSS(CONNECTION_BANNER_CSS);
+
+// A clicked desktop notification must raise the (possibly minimized or
+// backgrounded) chat window. The page's SPA calls window.focus(), which a
+// renderer can't rely on for that on Windows/Linux — the wrapped Notification
+// (see NOTIFY_OVERRIDE_SOURCE) dispatches a DOM event that crosses the world
+// boundary, and main restores/focuses the BrowserWindow. Nothing is exposed
+// to the page: the worst untrusted code can do is focus the app's own window.
+document.addEventListener(NOTIFICATION_ACTIVATED_EVENT, () => {
+  ipcRenderer.send('notification:activated');
+});
 
 // Connection banner. The main process tracks connection/auth state from signals
 // it can see (power resume, page-load failures, HTTP 401/419) and pushes the
