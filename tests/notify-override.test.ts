@@ -1,11 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { NOTIFY_OVERRIDE_SOURCE } from '../src/lib/notify-override';
+import { NOTIFICATION_ACTIVATED_EVENT, NOTIFY_OVERRIDE_SOURCE } from '../src/lib/notify-override';
 
 describe('notification icon stripper', () => {
   let calls: Array<{ title: string; opts: NotificationOptions | undefined }>;
+  let listeners: Array<{ type: string; handler: () => void }>;
+  let dispatched: Event[];
 
   beforeEach(() => {
     calls = [];
+    listeners = [];
+    dispatched = [];
     class FakeNotification {
       static permission = 'granted';
       static maxActions = 2;
@@ -13,14 +17,24 @@ describe('notification icon stripper', () => {
       constructor(title: string, opts?: NotificationOptions) {
         calls.push({ title, opts });
       }
+      addEventListener(type: string, handler: () => void) {
+        listeners.push({ type, handler });
+      }
     }
     (globalThis as any).window = globalThis;
     (globalThis as any).Notification = FakeNotification;
+    (globalThis as any).document = {
+      dispatchEvent: (event: Event) => {
+        dispatched.push(event);
+        return true;
+      },
+    };
   });
 
   afterEach(() => {
     delete (globalThis as any).Notification;
     delete (globalThis as any).window;
+    delete (globalThis as any).document;
   });
 
   it('strips icon, image, and badge and forces silent on notification options', () => {
@@ -60,5 +74,41 @@ describe('notification icon stripper', () => {
     const wrapped = (globalThis as any).Notification;
     new Function(NOTIFY_OVERRIDE_SOURCE)();
     expect((globalThis as any).Notification).toBe(wrapped);
+  });
+
+  it('a notification click dispatches the activation event on document', () => {
+    new Function(NOTIFY_OVERRIDE_SOURCE)();
+    new (globalThis as any).Notification('Hello', { body: 'world' });
+    expect(listeners).toHaveLength(1);
+    expect(listeners[0].type).toBe('click');
+    listeners[0].handler();
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0].type).toBe(NOTIFICATION_ACTIVATED_EVENT);
+  });
+
+  it('a click with a torn-down document is swallowed, not thrown', () => {
+    new Function(NOTIFY_OVERRIDE_SOURCE)();
+    new (globalThis as any).Notification('Hello');
+    (globalThis as any).document = {
+      dispatchEvent: () => {
+        throw new Error('document gone');
+      },
+    };
+    expect(() => listeners[0].handler()).not.toThrow();
+  });
+
+  it('tolerates notification instances without addEventListener', () => {
+    class MinimalNotification {
+      static permission = 'granted';
+      static maxActions = 0;
+      static requestPermission = vi.fn(async () => 'granted' as NotificationPermission);
+      constructor(title: string, opts?: NotificationOptions) {
+        calls.push({ title, opts });
+      }
+    }
+    (globalThis as any).Notification = MinimalNotification;
+    new Function(NOTIFY_OVERRIDE_SOURCE)();
+    expect(() => new (globalThis as any).Notification('Hi')).not.toThrow();
+    expect(calls).toHaveLength(1);
   });
 });
