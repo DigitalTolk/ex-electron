@@ -4,6 +4,7 @@ import {
   Tray,
   Menu,
   clipboard,
+  dialog,
   ipcMain,
   shell,
   nativeImage,
@@ -16,8 +17,10 @@ import {
 } from 'electron';
 import path from 'node:path';
 import http from 'node:http';
+import fs from 'node:fs';
 import { loadSettings, saveSettings, type Settings } from './lib/settings';
 import { safeUrl, trimTrailingSlash, isHttpUrl, isSameHost } from './lib/url';
+import { imageFilename, uniqueDownloadPath } from './lib/download';
 import { parseUnreadCount } from './lib/title';
 import { overlayBadgeSvg } from './lib/overlay';
 import { AUTH_CALLBACK_HTML } from './lib/auth-callback';
@@ -448,9 +451,9 @@ async function startDesktopAuth(): Promise<void> {
 // ---- tray + unread badge ---------------------------------------------------
 
 // Right-click menu for the chat window. The chat host is untrusted so we keep
-// this minimal: copy a link target if there is one, plus the standard
-// edit-role items (cut/copy/paste). Everything routes through Electron's own
-// roles so behavior matches the OS.
+// this minimal: copy a link target if there is one, image save/copy actions on
+// any image, plus the standard edit-role items (cut/copy/paste). Everything
+// else routes through Electron's own roles so behavior matches the OS.
 function chatContextMenuItems(params: ContextMenuParams): MenuItemConstructorOptions[] {
   const items: MenuItemConstructorOptions[] = [];
 
@@ -458,6 +461,29 @@ function chatContextMenuItems(params: ContextMenuParams): MenuItemConstructorOpt
     items.push({
       label: 'Copy link',
       click: () => clipboard.writeText(params.linkURL),
+    });
+  }
+
+  // Images — including the full-size ones in the lightbox — are served from
+  // authenticated URLs, so previously the only way to get one out was to open
+  // the attachment and use the SPA's download button. Offer save/copy directly.
+  // Save fetches through the chat session (so its cookies authorize the
+  // request); Copy uses the already-decoded bitmap, so it works for any image.
+  if (params.hasImageContents) {
+    if (items.length > 0) items.push({ type: 'separator' });
+    const src = safeUrl(params.srcURL);
+    const canSave = (!!src && isHttpUrl(src)) || params.srcURL.startsWith('data:');
+    if (canSave) {
+      items.push(
+        { label: 'Save Image', click: () => void saveImage(params.srcURL, false) },
+        { label: 'Save Image As…', click: () => void saveImage(params.srcURL, true) },
+      );
+    }
+    // No 'copyImage' menu role exists; copy the decoded bitmap at the click
+    // point instead. Works for any rendered image, including blob: sources.
+    items.push({
+      label: 'Copy Image',
+      click: () => chatWindow?.webContents.copyImageAt(params.x, params.y),
     });
   }
 
@@ -473,6 +499,49 @@ function chatContextMenuItems(params: ContextMenuParams): MenuItemConstructorOpt
   }
 
   return items;
+}
+
+// Save an image from the chat window to disk. We fetch through the chat
+// session rather than downloadURL()ing so the request carries the session's
+// cookies (chat images sit behind auth) and so we never disturb the SPA's own
+// downloads with a global will-download handler. `saveAs` shows the native save
+// dialog; otherwise it drops into Downloads with a non-colliding name. blob:
+// sources can't be fetched from the main process and are filtered out by the
+// menu — Copy Image still covers them via the decoded bitmap.
+async function saveImage(rawUrl: string, saveAs: boolean): Promise<void> {
+  if (!chatWindow || chatWindow.isDestroyed() || !rawUrl) return;
+
+  let buffer: Buffer;
+  let contentType: string;
+  try {
+    const res = await session.fromPartition(CHAT_PARTITION).fetch(rawUrl);
+    if (!res.ok) throw new Error(`unexpected status ${res.status}`);
+    buffer = Buffer.from(await res.arrayBuffer());
+    contentType = res.headers.get('content-type') ?? '';
+  } catch (err) {
+    console.error('image download failed:', err);
+    return;
+  }
+
+  const downloads = app.getPath('downloads');
+  const filename = imageFilename(rawUrl, contentType);
+
+  let target: string;
+  if (saveAs) {
+    const result = await dialog.showSaveDialog(chatWindow, {
+      defaultPath: path.join(downloads, filename),
+    });
+    if (result.canceled || !result.filePath) return;
+    target = result.filePath;
+  } else {
+    target = uniqueDownloadPath(downloads, filename, fs.existsSync);
+  }
+
+  try {
+    await fs.promises.writeFile(target, buffer);
+  } catch (err) {
+    console.error('image save failed:', err);
+  }
 }
 
 function buildTrayMenu(): Menu {
