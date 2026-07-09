@@ -53,6 +53,11 @@ let pendingAuth: { server: http.Server; authUrl: string } | null = null;
 
 const CHAT_PARTITION = 'persist:ex-chat';
 
+// Private isolated world for our context-menu image probe. Distinct from the
+// preload's world so we get untampered copies of the DOM APIs; any unused id
+// works since all worlds in a frame share the same document.
+const IMAGE_PROBE_WORLD_ID = 1010;
+
 // ---- connection / reconnect state ------------------------------------------
 //
 // The shell owns no SPA code, so it can't see the chat app's own WebSocket.
@@ -300,10 +305,7 @@ function createChatWindow(): void {
   });
 
   chatWindow.webContents.on('context-menu', (_event, params) => {
-    if (!chatWindow) return;
-    const items = chatContextMenuItems(params);
-    if (items.length === 0) return;
-    Menu.buildFromTemplate(items).popup({ window: chatWindow });
+    void showChatContextMenu(params);
   });
 
   chatWindow.webContents.on('page-title-updated', (event, title) => {
@@ -450,11 +452,37 @@ async function startDesktopAuth(): Promise<void> {
 
 // ---- tray + unread badge ---------------------------------------------------
 
+// Build and show the chat window's right-click menu. Electron's context-menu
+// hit-test only flags an image when the cursor actually lands on a hit-testable
+// one, so images the page renders pointer-events:none — notably the lightbox's
+// full-size picture, which sits under a gesture overlay — arrive here with
+// hasImageContents:false and no srcURL. When that happens, ask the renderer to
+// find the image itself before building the menu.
+async function showChatContextMenu(params: ContextMenuParams): Promise<void> {
+  const win = chatWindow;
+  if (!win || win.isDestroyed()) return;
+
+  let imageUrl: string | null = params.hasImageContents ? params.srcURL : null;
+  if (!imageUrl && !params.isEditable) {
+    imageUrl = await resolveImageAtPoint(win, params.x, params.y);
+    if (win.isDestroyed()) return;
+  }
+
+  const items = chatContextMenuItems(params, imageUrl);
+  if (items.length === 0) return;
+  Menu.buildFromTemplate(items).popup({ window: win });
+}
+
 // Right-click menu for the chat window. The chat host is untrusted so we keep
 // this minimal: copy a link target if there is one, image save/copy actions on
 // any image, plus the standard edit-role items (cut/copy/paste). Everything
-// else routes through Electron's own roles so behavior matches the OS.
-function chatContextMenuItems(params: ContextMenuParams): MenuItemConstructorOptions[] {
+// else routes through Electron's own roles so behavior matches the OS. `imageUrl`
+// is the image under the cursor (params.srcURL, or one the renderer resolved for
+// us when the hit-test missed it), or null when there is no image.
+function chatContextMenuItems(
+  params: ContextMenuParams,
+  imageUrl: string | null,
+): MenuItemConstructorOptions[] {
   const items: MenuItemConstructorOptions[] = [];
 
   if (params.linkURL) {
@@ -467,24 +495,30 @@ function chatContextMenuItems(params: ContextMenuParams): MenuItemConstructorOpt
   // Images — including the full-size ones in the lightbox — are served from
   // authenticated URLs, so previously the only way to get one out was to open
   // the attachment and use the SPA's download button. Offer save/copy directly.
-  // Save fetches through the chat session (so its cookies authorize the
-  // request); Copy uses the already-decoded bitmap, so it works for any image.
-  if (params.hasImageContents) {
+  // Save/Copy fetch through the chat session so its cookies authorize the
+  // request.
+  if (imageUrl) {
+    const url = imageUrl;
     if (items.length > 0) items.push({ type: 'separator' });
-    const src = safeUrl(params.srcURL);
-    const canSave = (!!src && isHttpUrl(src)) || params.srcURL.startsWith('data:');
-    if (canSave) {
+    const src = safeUrl(url);
+    const canFetch = (!!src && isHttpUrl(src)) || url.startsWith('data:');
+    if (canFetch) {
       items.push(
-        { label: 'Save Image', click: () => void saveImage(params.srcURL, false) },
-        { label: 'Save Image As…', click: () => void saveImage(params.srcURL, true) },
+        { label: 'Save Image', click: () => void saveImage(url, false) },
+        { label: 'Save Image As…', click: () => void saveImage(url, true) },
       );
     }
-    // No 'copyImage' menu role exists; copy the decoded bitmap at the click
-    // point instead. Works for any rendered image, including blob: sources.
-    items.push({
-      label: 'Copy Image',
-      click: () => chatWindow?.webContents.copyImageAt(params.x, params.y),
-    });
+    // Copy: when the click actually landed on the image, copy the decoded
+    // bitmap at that point — it's cheap and also covers blob: sources. When the
+    // image was resolved out from under a pointer-events:none overlay (the
+    // lightbox), the hit-test can't see it, so fetch the bytes and put them on
+    // the clipboard ourselves instead.
+    if (params.hasImageContents) {
+      const { x, y } = params;
+      items.push({ label: 'Copy Image', click: () => chatWindow?.webContents.copyImageAt(x, y) });
+    } else if (canFetch) {
+      items.push({ label: 'Copy Image', click: () => void copyImage(url) });
+    }
   }
 
   if (params.isEditable) {
@@ -501,34 +535,86 @@ function chatContextMenuItems(params: ContextMenuParams): MenuItemConstructorOpt
   return items;
 }
 
-// Save an image from the chat window to disk. We fetch through the chat
-// session rather than downloadURL()ing so the request carries the session's
-// cookies (chat images sit behind auth) and so we never disturb the SPA's own
-// downloads with a global will-download handler. `saveAs` shows the native save
-// dialog; otherwise it drops into Downloads with a non-colliding name. blob:
-// sources can't be fetched from the main process and are filtered out by the
-// menu — Copy Image still covers them via the decoded bitmap.
-async function saveImage(rawUrl: string, saveAs: boolean): Promise<void> {
-  if (!chatWindow || chatWindow.isDestroyed() || !rawUrl) return;
+// Find the image under the cursor when Electron's hit-test reported none. The
+// lightbox paints its picture with pointer-events:none beneath a gesture
+// overlay, so neither the context-menu hit-test nor copyImageAt(x,y) can see
+// it. We run in a private isolated world (own copies of the DOM APIs, so the
+// untrusted page can't tamper with the result) and look first for any <img>
+// under the point, then for the largest <img> whose box merely *contains* the
+// point — that catches the pointer-events:none case. The URL is still validated
+// against safeUrl/isHttpUrl before anything is fetched.
+async function resolveImageAtPoint(
+  win: BrowserWindow,
+  x: number,
+  y: number,
+): Promise<string | null> {
+  const code = `(() => {
+    const x = ${x}, y = ${y};
+    for (const el of document.elementsFromPoint(x, y)) {
+      if (el.tagName === 'IMG') {
+        const s = el.currentSrc || el.src;
+        if (s) return s;
+      }
+    }
+    let best = null, bestArea = -1;
+    for (const img of document.images) {
+      const r = img.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) continue;
+      if (x < r.left || x > r.right || y < r.top || y > r.bottom) continue;
+      const area = r.width * r.height;
+      if (area > bestArea) { bestArea = area; best = img; }
+    }
+    return best ? (best.currentSrc || best.src) : null;
+  })()`;
+  try {
+    const result: unknown = await win.webContents.executeJavaScriptInIsolatedWorld(
+      IMAGE_PROBE_WORLD_ID,
+      [{ code }],
+    );
+    return typeof result === 'string' && result ? result : null;
+  } catch (err) {
+    console.error('image probe failed:', err);
+    return null;
+  }
+}
 
-  let buffer: Buffer;
-  let contentType: string;
+// Fetch image bytes through the chat session so the request carries the
+// session's cookies (chat images sit behind auth). blob: URLs can't be reached
+// from the main process and are filtered out before we get here.
+async function fetchChatImage(
+  rawUrl: string,
+): Promise<{ buffer: Buffer; contentType: string } | null> {
   try {
     const res = await session.fromPartition(CHAT_PARTITION).fetch(rawUrl);
     if (!res.ok) throw new Error(`unexpected status ${res.status}`);
-    buffer = Buffer.from(await res.arrayBuffer());
-    contentType = res.headers.get('content-type') ?? '';
+    return {
+      buffer: Buffer.from(await res.arrayBuffer()),
+      contentType: res.headers.get('content-type') ?? '',
+    };
   } catch (err) {
-    console.error('image download failed:', err);
-    return;
+    console.error('image fetch failed:', err);
+    return null;
   }
+}
+
+// Save an image from the chat window to disk. We fetch (rather than
+// downloadURL()) so the request is authenticated and so we never disturb the
+// SPA's own downloads with a global will-download handler. `saveAs` shows the
+// native save dialog; otherwise it drops into Downloads with a non-colliding
+// name.
+async function saveImage(rawUrl: string, saveAs: boolean): Promise<void> {
+  const win = chatWindow;
+  if (!win || win.isDestroyed() || !rawUrl) return;
+
+  const image = await fetchChatImage(rawUrl);
+  if (!image || win.isDestroyed()) return;
 
   const downloads = app.getPath('downloads');
-  const filename = imageFilename(rawUrl, contentType);
+  const filename = imageFilename(rawUrl, image.contentType);
 
   let target: string;
   if (saveAs) {
-    const result = await dialog.showSaveDialog(chatWindow, {
+    const result = await dialog.showSaveDialog(win, {
       defaultPath: path.join(downloads, filename),
     });
     if (result.canceled || !result.filePath) return;
@@ -538,10 +624,24 @@ async function saveImage(rawUrl: string, saveAs: boolean): Promise<void> {
   }
 
   try {
-    await fs.promises.writeFile(target, buffer);
+    await fs.promises.writeFile(target, image.buffer);
   } catch (err) {
     console.error('image save failed:', err);
   }
+}
+
+// Copy a lightbox (pointer-events:none) image to the clipboard. copyImageAt
+// can't reach it because the hit-test misses it, so we fetch the bytes and
+// decode them ourselves. Normal images use copyImageAt instead (see the menu).
+async function copyImage(rawUrl: string): Promise<void> {
+  const image = await fetchChatImage(rawUrl);
+  if (!image) return;
+  const bitmap = nativeImage.createFromBuffer(image.buffer);
+  if (bitmap.isEmpty()) {
+    console.error('copy image: could not decode', rawUrl);
+    return;
+  }
+  clipboard.writeImage(bitmap);
 }
 
 function buildTrayMenu(): Menu {
