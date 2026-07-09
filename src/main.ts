@@ -25,6 +25,8 @@ import { parseUnreadCount } from './lib/title';
 import { overlayBadgeSvg } from './lib/overlay';
 import { AUTH_CALLBACK_HTML } from './lib/auth-callback';
 import { authStateForXhr, type ConnectionState } from './lib/connection';
+import { getDndState } from './lib/dnd-state';
+import { DND_IPC_CHANNEL } from './lib/dnd-bridge';
 
 let isQuitting = false;
 
@@ -851,9 +853,18 @@ ipcMain.handle('settings:saveChatUrl', (_event, url: unknown): boolean => {
 // sender so only the chat window can drive reconnect/sign-in — these channels
 // are never exposed to the untrusted page, but the guard keeps the setup window
 // (or a stray renderer) from triggering them too.
-function fromChatWindow(event: Electron.IpcMainEvent): boolean {
+function fromChatWindow(event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent): boolean {
   return !!chatWindow && !chatWindow.isDestroyed() && event.sender === chatWindow.webContents;
 }
+
+// OS Do-Not-Disturb / Focus state for the chat preload's DnD bridge — the SPA
+// gates its custom notification ping on this so the ping goes quiet while the
+// user is on Focus. Answer false for any other sender: an unexpected renderer
+// gets "not DnD", never an error.
+ipcMain.handle(DND_IPC_CHANNEL, (event) => {
+  if (!fromChatWindow(event)) return false;
+  return getDndState();
+});
 
 ipcMain.on('connection:offline', (event) => {
   if (!fromChatWindow(event)) return;

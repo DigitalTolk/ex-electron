@@ -24,7 +24,10 @@ async function run(): Promise<void> {
     target: 'node24',
     format: 'cjs',
     sourcemap: false,
-    external: ['electron'],
+    // windows-focus-assist is a native addon (optionalDependency, built only
+    // on Windows) — it must stay a runtime require, resolved from the
+    // packaged node_modules, not be inlined into the bundle.
+    external: ['electron', 'windows-focus-assist'],
     logLevel: 'info',
   });
 
