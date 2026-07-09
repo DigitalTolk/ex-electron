@@ -27,16 +27,24 @@ function appRegionFor(selector: string): string | undefined {
 }
 
 describe('chat drag region css', () => {
-  it('marks the app-chrome title bar as a window drag region', () => {
-    expect(appRegionFor('[data-app-chrome="true"]')).toBe('drag');
+  it('marks the app-chrome title bar (the <header>) as a window drag region', () => {
+    expect(appRegionFor('header[data-app-chrome="true"]')).toBe('drag');
   });
 
-  it('opts every descendant of the app-chrome bar out of the drag region', () => {
-    // -webkit-app-region: drag is inherited and swallows wheel events. When the
-    // chrome bar wraps scrollable content (the sidebar), non-interactive gaps
-    // between channels/categories inherit drag and become unscrollable. Opting
-    // all descendants out keeps only the bar's own empty area draggable.
-    expect(appRegionFor('[data-app-chrome="true"] *')).toBe('no-drag');
+  it('does NOT drag the bare data-app-chrome surfaces (banners, sidebars)', () => {
+    // data-app-chrome is a sidebar-colour marker, not a title-bar marker: it
+    // also sits on the scrollable channel sidebars. Dragging those swallows
+    // wheel events and freezes the channel list, so only the <header> variant
+    // becomes a drag region.
+    expect(appRegionFor('[data-app-chrome="true"]')).toBeUndefined();
+  });
+
+  it('does NOT use a blanket descendant opt-out', () => {
+    // The old `[data-app-chrome="true"] *` no-drag rule (needed only because the
+    // sidebars were wrongly draggable) also stripped drag from the top bar's
+    // grid columns, killing the drag space beside the search field. Scoping the
+    // region to the header removes the need for it.
+    expect(appRegionFor('[data-app-chrome="true"] *')).toBeUndefined();
   });
 
   it('does NOT mark plain <header> elements as a drag region', () => {

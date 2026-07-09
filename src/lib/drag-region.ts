@@ -1,31 +1,30 @@
 // Without a native title bar (titleBarStyle: 'hiddenInset' on macOS,
 // 'hidden' + titleBarOverlay on Win/Linux) the OS has no built-in drag
-// affordance around the chat SPA's top search bar. The chat shell marks
-// that one bar with data-app-chrome="true", so we scope the window drag
-// region to that element and opt common interactive controls back out —
-// the search input, buttons and links inside it stay clickable, and the
-// empty space around them moves/zooms the window via the OS's native
-// title-bar drag and double-click gestures.
+// affordance around the chat SPA's top search bar, so we inject one.
 //
-// This MUST NOT be a blanket `header` rule: the SPA renders many other
-// <header> elements (per-thread cards on /threads, channel/conversation
-// headers, the thread panel). A drag region swallows wheel events, so a
-// blanket rule left the page stuck whenever the cursor sat over any of
-// those headers — only the real title bar should drag.
+// data-app-chrome="true" looks like a title-bar marker but ISN'T: the SPA
+// stamps it on every sidebar-coloured surface — the top search bar
+// (a <header>), the update/notification banners, and the three channel
+// sidebars (desktop/compact/mobile <aside>s). Targeting the bare attribute
+// therefore also turned the scrollable sidebars into drag regions, and since
+// a drag region swallows wheel events the channel list became unscrollable in
+// the gaps between rows. The previous fix papered over that by opting every
+// descendant back out (`[data-app-chrome="true"] *`) — but that also stripped
+// drag from the top bar's own layout containers (the left/right grid columns),
+// so the empty space on either side of the search field, where you'd normally
+// grab the window, stopped dragging.
 //
-// -webkit-app-region: drag is also inherited by descendants, and a drag
-// region swallows wheel events. When the chrome bar wraps scrollable content
-// (the sidebar with its categories/channels), the gaps between rows inherit
-// drag and become unscrollable — interactive rows still work because they
-// match the no-drag selectors, but the empty space between them does not. So
-// `[data-app-chrome="true"] *` opts every descendant back out: only the bar's
-// own empty area drags, everything inside it stays clickable and scrollable.
+// The top bar is the ONLY <header> carrying data-app-chrome, so
+// `header[data-app-chrome="true"]` selects it and nothing else. Only that one
+// (non-scrollable) strip becomes the drag region; the sidebars are left alone
+// and scroll normally, so no blanket descendant opt-out is needed. The bar's
+// container <div>s inherit the drag region — their empty space drags the window
+// — while the interactive controls below opt back out so they stay clickable.
+// (no-drag only has any effect inside a drag region, so scoping these to the
+// header buys nothing; leaving them global keeps the list short.)
 export const CHAT_DRAG_REGION_CSS = `
-  [data-app-chrome="true"] {
+  header[data-app-chrome="true"] {
     -webkit-app-region: drag;
-  }
-  [data-app-chrome="true"] * {
-    -webkit-app-region: no-drag;
   }
   input, textarea, select, button, a,
   [role="button"], [role="link"], [role="textbox"], [role="searchbox"], [role="combobox"], [role="menuitem"], [role="tab"],
