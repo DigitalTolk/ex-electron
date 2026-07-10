@@ -1,5 +1,6 @@
 import { ipcRenderer, webFrame } from 'electron';
 import { NOTIFICATION_ACTIVATED_EVENT, NOTIFY_OVERRIDE_SOURCE } from './lib/notify-override';
+import { DND_BRIDGE_SOURCE, DND_IPC_CHANNEL, installDndAnswerer } from './lib/dnd-bridge';
 import { CHAT_DRAG_REGION_CSS } from './lib/drag-region';
 import {
   CONNECTION_BANNER_CSS,
@@ -14,6 +15,16 @@ import {
 webFrame.executeJavaScript(NOTIFY_OVERRIDE_SOURCE).catch((err) => {
   console.error('notification override failed:', err);
 });
+
+// Install the SPA's desktop-shell markers + DnD bridge (window.__EX_DESKTOP__
+// and window.__EX_DND__) into the page's main world, and answer its queries
+// from this isolated world via DOM events — ipcRenderer itself is never
+// exposed to the untrusted page. The worst the page can do is read a boolean
+// "is the OS on Focus" answer.
+webFrame.executeJavaScript(DND_BRIDGE_SOURCE).catch((err) => {
+  console.error('dnd bridge failed:', err);
+});
+installDndAnswerer(document, () => ipcRenderer.invoke(DND_IPC_CHANNEL));
 
 webFrame.insertCSS(CHAT_DRAG_REGION_CSS);
 webFrame.insertCSS(CONNECTION_BANNER_CSS);

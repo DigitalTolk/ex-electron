@@ -52,6 +52,16 @@ linux:
 
 win:
   icon: prebuilt/icon.ico
+  # The Focus Assist addon (main.ts DnD bridge) is required at runtime on
+  # Windows only. The top-level files list ships just dist/, so the module
+  # and its require chain are added here; the .node binary must live outside
+  # the asar for Windows to load it.
+  files:
+    - node_modules/windows-focus-assist/**
+    - node_modules/bindings/**
+    - node_modules/file-uri-to-path/**
+  asarUnpack:
+    - node_modules/windows-focus-assist/**/*.node
   target:
     - target: nsis
       arch:
