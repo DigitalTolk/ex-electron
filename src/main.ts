@@ -27,6 +27,8 @@ import { AUTH_CALLBACK_HTML } from './lib/auth-callback';
 import { authStateForXhr, type ConnectionState } from './lib/connection';
 import { getDndState } from './lib/dnd-state';
 import { DND_IPC_CHANNEL } from './lib/dnd-bridge';
+import { AwayMonitor } from './lib/away-monitor';
+import { PRESENCE_IPC_CHANNEL } from './lib/presence-bridge';
 
 let isQuitting = false;
 
@@ -49,6 +51,10 @@ const SETTINGS_FILE = path.join(app.getPath('userData'), 'settings.json');
 const settings: Settings = loadSettings(SETTINGS_FILE);
 let setupWindow: BrowserWindow | null = null;
 let chatWindow: BrowserWindow | null = null;
+// OS-presence watcher (lock/sleep/idle → the SPA stops acking notifications
+// so its mobile fallback fires). Constructed in whenReady — powerMonitor's
+// methods are unusable before the app's ready event.
+let awayMonitor: AwayMonitor | null = null;
 let tray: Tray | null = null;
 let unreadCount = 0;
 let pendingAuth: { server: http.Server; authUrl: string } | null = null;
@@ -866,6 +872,15 @@ ipcMain.handle(DND_IPC_CHANNEL, (event) => {
   return getDndState();
 });
 
+// Current OS-presence verdict for the chat preload's initial pull (pushed
+// transitions ride webContents.send — see startAwayMonitor). Any other
+// sender gets 'unsupported': the SPA's own web heuristics govern, never an
+// error.
+ipcMain.handle(PRESENCE_IPC_CHANNEL, (event) => {
+  if (!fromChatWindow(event)) return 'unsupported';
+  return awayMonitor?.current() ?? 'unsupported';
+});
+
 ipcMain.on('connection:offline', (event) => {
   if (!fromChatWindow(event)) return;
   // No point retrying while the OS says there's no network; wait for 'online'.
@@ -924,12 +939,36 @@ app.on('before-quit', () => {
 // never flipped so no online/offline event fires and the page still looks
 // "loaded". Force a reconnect on resume to recover it.
 powerMonitor.on('resume', () => {
+  awayMonitor?.handleResume();
   if (chatWindow && connectionState !== 'auth-expired') reconnectNow();
 });
+
+// startAwayMonitor wires the OS-presence watcher: 1 Hz idle polling plus
+// lock/unlock/suspend transitions, pushed to the chat page over IPC (the
+// preload stamps them on <html> for the SPA — see presence-bridge.ts).
+// Called from whenReady because powerMonitor's methods only work after the
+// ready event. A page mid-load misses pushes harmlessly: the preload pulls
+// the current state once on install.
+function startAwayMonitor(): void {
+  awayMonitor = new AwayMonitor({
+    platform: process.platform,
+    getSystemIdleTime: () => powerMonitor.getSystemIdleTime(),
+  });
+  awayMonitor.onChange((state) => {
+    if (chatWindow && !chatWindow.isDestroyed()) {
+      chatWindow.webContents.send(PRESENCE_IPC_CHANNEL, state);
+    }
+  });
+  powerMonitor.on('lock-screen', () => awayMonitor?.handleLockScreen());
+  powerMonitor.on('unlock-screen', () => awayMonitor?.handleUnlockScreen());
+  powerMonitor.on('suspend', () => awayMonitor?.handleSuspend());
+  awayMonitor.start();
+}
 
 app.whenReady().then(() => {
   Menu.setApplicationMenu(buildApplicationMenu());
   createTray();
+  startAwayMonitor();
   if (settings.chatUrl) createChatWindow();
   else createSetupWindow();
 });

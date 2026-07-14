@@ -1,6 +1,7 @@
 import { ipcRenderer, webFrame } from 'electron';
 import { NOTIFICATION_ACTIVATED_EVENT, NOTIFY_OVERRIDE_SOURCE } from './lib/notify-override';
 import { DND_BRIDGE_SOURCE, DND_IPC_CHANNEL, installDndAnswerer } from './lib/dnd-bridge';
+import { installPresenceReceiver, PRESENCE_IPC_CHANNEL } from './lib/presence-bridge';
 import { CHAT_DRAG_REGION_CSS } from './lib/drag-region';
 import {
   CONNECTION_BANNER_CSS,
@@ -25,6 +26,16 @@ webFrame.executeJavaScript(DND_BRIDGE_SOURCE).catch((err) => {
   console.error('dnd bridge failed:', err);
 });
 installDndAnswerer(document, () => ipcRenderer.invoke(DND_IPC_CHANNEL));
+
+// OS-presence bridge (away-monitor → page): main pushes lock/sleep/idle
+// verdicts; we stamp them on <html> and fire a DOM event the SPA listens to
+// (its src/lib/desktop-presence.ts). The page sees only a state string —
+// ipcRenderer stays in this isolated world.
+installPresenceReceiver(
+  document,
+  (cb) => ipcRenderer.on(PRESENCE_IPC_CHANNEL, (_event, state: string) => cb(state)),
+  () => ipcRenderer.invoke(PRESENCE_IPC_CHANNEL),
+);
 
 webFrame.insertCSS(CHAT_DRAG_REGION_CSS);
 webFrame.insertCSS(CONNECTION_BANNER_CSS);
