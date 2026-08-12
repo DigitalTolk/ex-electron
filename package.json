@@ -30,7 +30,7 @@
     "@vitest/coverage-v8": "^4.1.10",
     "electron": "^43.3.0",
     "electron-builder": "^26.15.3",
-    "esbuild": "^0.28.1",
+    "esbuild": "^0.28.2",
     "eslint": "^10.7.0",
     "png-to-ico": "^3.0.2",
     "sharp": "^0.35.3",
