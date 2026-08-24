@@ -27,7 +27,7 @@
     "@anthropic-ai/bedrock-sdk": "^0.32.4",
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.13.2",
-    "@vitest/coverage-v8": "^4.1.10",
+    "@vitest/coverage-v8": "^4.1.11",
     "electron": "^43.4.0",
     "electron-builder": "^26.15.3",
     "esbuild": "^0.28.2",
