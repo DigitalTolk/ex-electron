@@ -27,7 +27,7 @@
     "dist:mac:stg": "npm run build && tsx scripts/build-app.ts --mac --arm64 --config.productName=ex-stg --config.extraMetadata.productName=ex-stg"
   },
   "devDependencies": {
-    "@anthropic-ai/bedrock-sdk": "^0.32.4",
+    "@anthropic-ai/bedrock-sdk": "^0.33.1",
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.13.2",
     "@vitest/coverage-v8": "^4.1.10",
