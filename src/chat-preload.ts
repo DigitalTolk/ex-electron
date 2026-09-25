@@ -1,6 +1,29 @@
 import { ipcRenderer, webFrame } from 'electron';
 import { NOTIFICATION_ACTIVATED_EVENT, NOTIFY_OVERRIDE_SOURCE } from './lib/notify-override';
 import { DND_BRIDGE_SOURCE, DND_IPC_CHANNEL, installDndAnswerer } from './lib/dnd-bridge';
+import {
+  ATTENTION_BRIDGE_SOURCE,
+  ATTENTION_IPC_CHANNEL,
+  installAttentionAnswerer,
+} from './lib/attention-bridge';
+import {
+  APPROVAL_BRIDGE_SOURCE,
+  APPROVAL_DECIDED_IPC,
+  APPROVAL_NOTIFY_IPC,
+  installApprovalAnswerer,
+  type ApprovalDecision,
+} from './lib/approval-bridge';
+import {
+  RUNNER_BRIDGE_SOURCE,
+  RUNNER_TOKEN_IPC_CHANNEL,
+  installRunnerTokenListener,
+} from './lib/runner-bridge';
+import {
+  CONNECTOR_SSO_BRIDGE_SOURCE,
+  CONNECTOR_SSO_IPC,
+  installConnectorSSOAnswerer,
+  type ConnectorSSOResult,
+} from './lib/connector-sso';
 import { CHAT_DRAG_REGION_CSS } from './lib/drag-region';
 import {
   CONNECTION_BANNER_CSS,
@@ -25,6 +48,48 @@ webFrame.executeJavaScript(DND_BRIDGE_SOURCE).catch((err) => {
   console.error('dnd bridge failed:', err);
 });
 installDndAnswerer(document, () => ipcRenderer.invoke(DND_IPC_CHANNEL));
+
+// Attention bridge: a blocked agent run asks the OS to flag the app (dock
+// bounce / taskbar flash) so an approval is noticeable even behind other
+// windows. Same shared-DOM crossing; nothing is exposed to the page.
+webFrame.executeJavaScript(ATTENTION_BRIDGE_SOURCE).catch((err) => {
+  console.error('attention bridge failed:', err);
+});
+installAttentionAnswerer(document, () => {
+  ipcRenderer.send(ATTENTION_IPC_CHANNEL);
+});
+
+// Approval bridge: a blocked gate becomes a NATIVE OS notification with
+// Approve / Reject (or choice) buttons; the clicked verdict comes back here
+// and is dispatched into the page, which POSTs it with the user's session.
+webFrame.executeJavaScript(APPROVAL_BRIDGE_SOURCE).catch((err) => {
+  console.error('approval bridge failed:', err);
+});
+installApprovalAnswerer(
+  document,
+  (payload) => ipcRenderer.invoke(APPROVAL_NOTIFY_IPC, payload),
+  (relay) => ipcRenderer.on(APPROVAL_DECIDED_IPC, (_event, decision: ApprovalDecision) => relay(decision)),
+);
+
+// Agent-runner token handoff: the SPA mints the runner-scoped token (it
+// holds the interactive session) and hands it to the shell, which runs the
+// local agent harness. Same shared-DOM crossing as the DnD bridge.
+webFrame.executeJavaScript(RUNNER_BRIDGE_SOURCE).catch((err) => {
+  console.error('runner bridge failed:', err);
+});
+installRunnerTokenListener(document, (token) => {
+  ipcRenderer.send(RUNNER_TOKEN_IPC_CHANNEL, token);
+});
+
+// Connector one-click SSO: the SPA asks the shell to open a service's own
+// sign-in window (the user authenticates with Microsoft there) and resolves
+// with the bearer the service mints, captured from its redirect. Same
+// shared-DOM crossing; the page only ever sees the token for the connector it
+// asked to connect, which it then installs with its own session.
+webFrame.executeJavaScript(CONNECTOR_SSO_BRIDGE_SOURCE).catch((err) => {
+  console.error('connector sso bridge failed:', err);
+});
+installConnectorSSOAnswerer(document, (req) => ipcRenderer.invoke(CONNECTOR_SSO_IPC, req) as Promise<ConnectorSSOResult>);
 
 webFrame.insertCSS(CHAT_DRAG_REGION_CSS);
 webFrame.insertCSS(CONNECTION_BANNER_CSS);

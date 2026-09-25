@@ -6,6 +6,7 @@ import {
   clipboard,
   dialog,
   ipcMain,
+  Notification,
   shell,
   nativeImage,
   nativeTheme,
@@ -27,13 +28,72 @@ import { AUTH_CALLBACK_HTML } from './lib/auth-callback';
 import { authStateForXhr, type ConnectionState } from './lib/connection';
 import { getDndState } from './lib/dnd-state';
 import { DND_IPC_CHANNEL } from './lib/dnd-bridge';
+import { ATTENTION_IPC_CHANNEL } from './lib/attention-bridge';
+import {
+  APPROVAL_DECIDED_IPC,
+  APPROVAL_NOTIFY_IPC,
+  type ApprovalDecision,
+  type ApprovalNotifyPayload,
+} from './lib/approval-bridge';
+import { RUNNER_TOKEN_IPC_CHANNEL } from './lib/runner-bridge';
+import {
+  CONNECTOR_SSO_IPC,
+  bearerFromAuthHeader,
+  scrubbedUserAgent,
+  tokenFromCaptureURL,
+  type ConnectorSSORequest,
+  type ConnectorSSOResult,
+} from './lib/connector-sso';
+import { onRunnerToken, pauseRunner, startFromPersisted, stopRunner } from './lib/runner-host';
 
 let isQuitting = false;
 
 // Drives the macOS application menu labels: "About ex", "Hide ex", "Quit ex".
-// Electron's default menu reads from app.getName(); this also covers `electron .`
-// in dev where there's no .app bundle to fall back to.
-app.setName('ex');
+// Packaged builds inherit the name from the bundled package.json's productName
+// — deliberately NOT overridden here, so an alternate-identity build (e.g. an
+// "ex-stg" test app pointed at staging) gets its own menu labels, userData dir,
+// and single-instance lock, and can run beside a normal install. `electron .`
+// in dev has no bundle to read, so name it here (the dev block below refines it).
+if (!app.isPackaged) {
+  app.setName('ex');
+}
+
+// Dev builds run under their own identity. The single-instance lock below is
+// keyed to userData, so without this a packaged install and a dev build fight
+// over ONE lock — launching the second just focuses the first. A separate
+// userData dir also keeps dev settings, login, and runner state (runner-id,
+// token, warm-session cache) from clobbering the real install's.
+if (!app.isPackaged) {
+  app.setName('ex-dev');
+  // EX_PROFILE gives each dev launch its OWN userData dir (session, login,
+  // runner identity) AND its own single-instance lock — so two instances can
+  // run side by side signed in as different users:
+  //   EX_PROFILE=alice npm start   # own window, own runner
+  //   EX_PROFILE=bob   npm start   # separate window + runner
+  // No EX_PROFILE keeps the default 'ex-dev' profile.
+  const profile = process.env.EX_PROFILE ? `ex-dev-${process.env.EX_PROFILE.replace(/[^a-z0-9_-]/gi, '')}` : 'ex-dev';
+  app.setName(profile);
+  app.setPath('userData', path.join(app.getPath('appData'), profile));
+}
+
+// --profile=<name> gives a packaged build its own identity (userData, session,
+// single-instance lock), so a second install — e.g. a local build pointed at
+// stg — can run beside the main one, each with its own login and server. A CLI
+// flag rather than an env var for the same reason EX_CHAT_URL is dev-only:
+// re-identifying a real install must be an explicit act, not ambient
+// environment. The name change also relabels the macOS menu ("Quit ex-stg"),
+// which is how you tell the two windows apart.
+if (app.isPackaged) {
+  const raw = process.argv.find((a) => a.startsWith('--profile='))?.slice('--profile='.length) ?? '';
+  const profileName = raw.replace(/[^a-z0-9_-]/gi, '');
+  if (profileName) {
+    // Prefix with the app's own name so profiles of an alternate-identity
+    // build (ex-stg) can never collide with the main install's profiles.
+    const profile = `${app.getName()}-${profileName}`;
+    app.setName(profile);
+    app.setPath('userData', path.join(app.getPath('appData'), profile));
+  }
+}
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -47,6 +107,20 @@ if (process.platform === 'win32') {
 const SETTINGS_FILE = path.join(app.getPath('userData'), 'settings.json');
 
 const settings: Settings = loadSettings(SETTINGS_FILE);
+
+// Dev-only server override: `EX_CHAT_URL=http://localhost:8500 npm start`
+// points the shell at a local backend for this session WITHOUT touching the
+// saved settings — quitting returns you to the remembered server. Ignored in
+// packaged builds so a stray env var can't redirect a real install.
+if (!app.isPackaged && process.env.EX_CHAT_URL) {
+  const override = safeUrl(process.env.EX_CHAT_URL);
+  if (override && isHttpUrl(override)) {
+    settings.chatUrl = trimTrailingSlash(override.origin);
+    console.log(`[dev] chat server overridden: ${settings.chatUrl}`);
+  } else {
+    console.warn(`[dev] invalid EX_CHAT_URL ignored: ${process.env.EX_CHAT_URL}`);
+  }
+}
 let setupWindow: BrowserWindow | null = null;
 let chatWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -356,6 +430,13 @@ function createChatWindow(): void {
       event.preventDefault();
       chatWindow?.hide();
     }
+  });
+
+  chatWindow.on('focus', () => {
+    // flashFrame latches until cleared, so a taskbar flagged for a blocked
+    // approval must stop flashing once the user is actually here. Harmless
+    // no-op on macOS, where dock.bounce('informational') ends on its own.
+    if (process.platform !== 'darwin') chatWindow?.flashFrame(false);
   });
 
   chatWindow.on('closed', () => {
@@ -809,6 +890,9 @@ function buildOverlayIcon(count: number): NativeImage | null {
 
 async function signOut(): Promise<void> {
   if (!settings.chatUrl) return;
+  // A signed-out user's agents must go offline, and the stored runner token
+  // dies with the session.
+  await stopRunner();
   const ses = session.fromPartition(CHAT_PARTITION);
   try {
     await ses.clearStorageData({
@@ -866,6 +950,15 @@ ipcMain.handle(DND_IPC_CHANNEL, (event) => {
   return getDndState();
 });
 
+// Agent-runner token from the SPA (via the chat-preload bridge). Guarded to
+// the chat window like every other chat-originated channel.
+ipcMain.on(RUNNER_TOKEN_IPC_CHANNEL, (event, token: unknown) => {
+  if (!fromChatWindow(event)) return;
+  if (typeof token !== 'string' || !token || token.length > 4096) return;
+  if (!settings.chatUrl) return;
+  onRunnerToken(token, settings.chatUrl);
+});
+
 ipcMain.on('connection:offline', (event) => {
   if (!fromChatWindow(event)) return;
   // No point retrying while the OS says there's no network; wait for 'online'.
@@ -885,6 +978,128 @@ ipcMain.on('connection:signin', (event) => {
   startDesktopAuth().catch((err) => console.error('desktop auth failed:', err));
 });
 
+ipcMain.on(ATTENTION_IPC_CHANNEL, (event) => {
+  if (!fromChatWindow(event)) return;
+  // An agent run is blocked waiting on this user. Flag the app the way the
+  // platform does it so the request is noticeable even when the window is
+  // behind others — and deliberately NOT for ordinary messages, so the signal
+  // keeps meaning "something is waiting on you".
+  //
+  // Skip while the window is already focused: the SPA only asks when the user
+  // isn't looking at that conversation, but if they are in the app at all the
+  // inline card is a click away and bouncing our own dock is just noise.
+  if (chatWindow?.isFocused()) return;
+  if (process.platform === 'darwin') {
+    // 'informational' bounces once rather than until the app is activated —
+    // enough to catch the eye without hijacking the dock indefinitely.
+    app.dock?.bounce('informational');
+  } else {
+    chatWindow?.flashFrame(true);
+  }
+});
+
+// ---- connector one-click SSO -------------------------------------------------
+//
+// The SPA's __EX_CONNECTOR_SSO__ bridge lands here: open the service's own SSO
+// entry point in a dedicated window, let the user sign in (Microsoft account),
+// and capture the bearer the service mints — primarily from the redirect URL
+// matching the connector's capture pattern (cliffhub ends its flow on
+// "/callback?token=..."), with the app's own Authorization headers as the
+// fallback for services that never expose the token in a URL. The window has
+// its own persistent partition so the user's Microsoft session survives for
+// silent reconnects, without ever mixing cookies with the ex session jar.
+
+const CONNECTOR_SSO_PARTITION = 'persist:ex-connector-sso';
+const CONNECTOR_SSO_TIMEOUT_MS = 5 * 60_000;
+let connectorSSOWindow: BrowserWindow | null = null;
+
+function runConnectorSSOCapture(startURL: string, capturePattern?: string, apiOrigin?: string): Promise<ConnectorSSOResult> {
+  const ses = session.fromPartition(CONNECTOR_SSO_PARTITION);
+  // Microsoft's sign-in refuses user agents it classifies as embedded
+  // browsers; the same Chromium minus the Electron and app tokens is accepted.
+  ses.setUserAgent(scrubbedUserAgent(ses.getUserAgent(), app.getName()));
+
+  const win = new BrowserWindow({
+    width: 560,
+    height: 720,
+    title: 'Sign in',
+    autoHideMenuBar: true,
+    webPreferences: {
+      partition: CONNECTOR_SSO_PARTITION,
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  connectorSSOWindow = win;
+  // The whole login flow is redirects within this one window; a page trying
+  // to pop another goes nowhere.
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+
+  return new Promise<ConnectorSSOResult>((resolve) => {
+    let settled = false;
+    const settle = (result: ConnectorSSOResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      ses.webRequest.onBeforeSendHeaders(null);
+      connectorSSOWindow = null;
+      if (!win.isDestroyed()) win.destroy();
+      resolve(result);
+    };
+    const timer = setTimeout(() => settle({ ok: false, error: 'sign-in timed out' }), CONNECTOR_SSO_TIMEOUT_MS);
+
+    // Primary capture: watching navigation means the token-bearing URL is
+    // caught (and cancelled) before the service's frontend ever renders.
+    const tryURL = (url: string, e?: Electron.Event) => {
+      const token = tokenFromCaptureURL(url, capturePattern);
+      if (!token) return;
+      e?.preventDefault();
+      settle({ ok: true, token });
+    };
+    win.webContents.on('will-redirect', (e, url) => tryURL(url, e));
+    win.webContents.on('will-navigate', (e, url) => tryURL(url, e));
+    win.webContents.on('did-navigate', (_e, url) => tryURL(url));
+    // Some services end their flow by redirecting to a loopback URL meant for
+    // a local listener (127.0.0.1:<port>/callback?token=…). Nothing listens
+    // there in our case, so if the redirect ever commits before will-redirect
+    // cancels it, the failed load still names the URL — and the token is in it.
+    win.webContents.on('did-redirect-navigation', (_e, url) => tryURL(url));
+    win.webContents.on('did-fail-load', (_e, _code, _desc, validatedURL) => tryURL(validatedURL));
+
+    // Fallback capture: the signed-in app's first bearer call to its own API.
+    if (apiOrigin) {
+      ses.webRequest.onBeforeSendHeaders({ urls: [`${apiOrigin}/*`] }, (details, callback) => {
+        callback({});
+        const token = bearerFromAuthHeader(details.requestHeaders ?? {});
+        if (token) settle({ ok: true, token });
+      });
+    }
+
+    win.on('closed', () => settle({ ok: false, error: 'sign-in window was closed' }));
+    win.loadURL(startURL).catch(() => settle({ ok: false, error: 'could not open the sign-in page' }));
+  });
+}
+
+// Main never THROWS across this invoke: a result object keeps the failure text
+// clean for the page instead of wrapped in "Error invoking remote method …".
+ipcMain.handle(CONNECTOR_SSO_IPC, (event, raw: unknown): Promise<ConnectorSSOResult> | ConnectorSSOResult => {
+  if (!fromChatWindow(event)) return { ok: false, error: 'sign-in is not available here' };
+  const req = raw && typeof raw === 'object' ? (raw as Partial<ConnectorSSORequest>) : {};
+  // The start URL is admin-registered server-side (https-only, SSRF-gated at
+  // ingest), but the shell re-checks: it is about to render that page and let
+  // the user type a password into it.
+  const start = typeof req.startURL === 'string' ? safeUrl(req.startURL) : null;
+  if (!start || !isHttpUrl(start)) return { ok: false, error: 'invalid sign-in URL' };
+  if (connectorSSOWindow && !connectorSSOWindow.isDestroyed()) {
+    connectorSSOWindow.focus();
+    return { ok: false, error: 'a sign-in window is already open' };
+  }
+  const capturePattern = typeof req.capturePattern === 'string' && req.capturePattern ? req.capturePattern : undefined;
+  const apiOrigin = typeof req.apiOrigin === 'string' ? safeUrl(req.apiOrigin)?.origin : undefined;
+  return runConnectorSSOCapture(start.toString(), capturePattern, apiOrigin);
+});
+
 ipcMain.on('notification:activated', (event) => {
   if (!fromChatWindow(event) || !chatWindow) return;
   // The user clicked a desktop notification: raise the window. The SPA's own
@@ -894,6 +1109,61 @@ ipcMain.on('notification:activated', (event) => {
   if (chatWindow.isMinimized()) chatWindow.restore();
   chatWindow.show();
   chatWindow.focus();
+});
+
+// A blocked agent gate: raise a NATIVE OS notification carrying its decision
+// buttons (Approve / Reject, or the offered choices), so the user can decide
+// from the notification itself — impossible via the renderer's web
+// Notification, which has no action buttons. The clicked verdict is sent back
+// to the chat window, which POSTs it with the user's session (the shell never
+// holds the token). Returns whether a native notification was actually shown;
+// a false return tells the SPA to fall back to its web banner.
+ipcMain.handle(APPROVAL_NOTIFY_IPC, (event, raw: ApprovalNotifyPayload): boolean => {
+  if (!fromChatWindow(event) || !Notification.isSupported()) return false;
+  const p = raw && typeof raw === 'object' ? raw : ({} as ApprovalNotifyPayload);
+  if (typeof p.approvalID !== 'string' || typeof p.runID !== 'string' || !p.approvalID || !p.runID) {
+    return false;
+  }
+
+  const choices = Array.isArray(p.choices) ? p.choices.filter((c) => typeof c === 'string' && c.trim()).slice(0, 4) : [];
+  // macOS shows the FIRST action inline and the rest under an "Options"
+  // hover-menu; Windows shows them all. A question surfaces its choices; a
+  // permission gate is Approve / Reject.
+  const actions = choices.length > 0 ? choices.map((c) => ({ type: 'button' as const, text: c })) : [{ type: 'button' as const, text: 'Approve' }, { type: 'button' as const, text: 'Reject' }];
+
+  const relay = (decision: ApprovalDecision) => {
+    if (chatWindow && !chatWindow.isDestroyed()) chatWindow.webContents.send(APPROVAL_DECIDED_IPC, decision);
+  };
+
+  const note = new Notification({
+    title: typeof p.title === 'string' && p.title ? p.title : 'Approval needed',
+    body: typeof p.body === 'string' ? p.body : '',
+    // The custom in-app ping is the app's only sound (DnD-gated); the OS
+    // notification stays silent so the two never double up.
+    silent: true,
+    actions,
+    // The primary (first) action index macOS reads when the whole banner is
+    // actioned via keyboard/Return.
+    ...(process.platform === 'darwin' ? { closeButtonText: 'Dismiss' } : {}),
+  });
+
+  note.on('action', (_e, index) => {
+    if (choices.length > 0) {
+      relay({ approvalID: p.approvalID, runID: p.runID, approve: true, choice: choices[index] });
+    } else {
+      relay({ approvalID: p.approvalID, runID: p.runID, approve: index === 0 });
+    }
+  });
+  // Body click (not a button): raise the window so the user can add a note or
+  // see full context — no verdict is sent.
+  note.on('click', () => {
+    if (!chatWindow || chatWindow.isDestroyed()) return;
+    if (chatWindow.isMinimized()) chatWindow.restore();
+    chatWindow.show();
+    chatWindow.focus();
+  });
+  note.show();
+  return true;
 });
 
 app.on('second-instance', () => {
@@ -917,6 +1187,9 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  // Stop claiming and let in-flight leases lapse server-side; the token
+  // stays persisted so agents come back online on next launch.
+  void pauseRunner();
 });
 
 // Waking from sleep is the most common way the chat WebSocket dies silently:
@@ -930,6 +1203,12 @@ powerMonitor.on('resume', () => {
 app.whenReady().then(() => {
   Menu.setApplicationMenu(buildApplicationMenu());
   createTray();
-  if (settings.chatUrl) createChatWindow();
-  else createSetupWindow();
+  if (settings.chatUrl) {
+    createChatWindow();
+    // Agents come online with the app: resume from the persisted runner
+    // token without waiting for the SPA to load and re-mint.
+    startFromPersisted(settings.chatUrl);
+  } else {
+    createSetupWindow();
+  }
 });

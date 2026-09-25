@@ -17,6 +17,10 @@ async function run(): Promise<void> {
       main: path.join(root, 'src/main.ts'),
       preload: path.join(root, 'src/preload.ts'),
       'chat-preload': path.join(root, 'src/chat-preload.ts'),
+      // The local MCP stdio server the harness CLI spawns per agent run. It
+      // runs under the Electron binary with ELECTRON_RUN_AS_NODE=1, so it's a
+      // plain Node bundle with no Electron imports.
+      'mcp-server': path.join(root, 'src/runner/mcp-server.ts'),
     },
     outdir: out,
     bundle: true,
