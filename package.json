@@ -9,6 +9,7 @@
   "license": "MIT",
   "scripts": {
     "regen-icons": "tsx scripts/make-icons.ts",
+    "fix:macos-signature": "node scripts/fix-macos-signature.mjs",
     "bundle": "tsx scripts/bundle.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
@@ -21,7 +22,9 @@
     "dist:mac": "npm run build && tsx scripts/build-app.ts --mac --arm64",
     "dist:linux": "npm run build && tsx scripts/build-app.ts --linux --x64 --arm64",
     "dist:win": "npm run build && tsx scripts/build-app.ts --win --x64 --arm64",
-    "dist:all": "npm run build && tsx scripts/build-app.ts --mac --arm64 --linux --x64 --arm64 --win --x64 --arm64"
+    "dist:all": "npm run build && tsx scripts/build-app.ts --mac --arm64 --linux --x64 --arm64 --win --x64 --arm64",
+    "postinstall": "node scripts/fix-macos-signature.mjs",
+    "dist:mac:stg": "npm run build && tsx scripts/build-app.ts --mac --arm64 --config.productName=ex-stg --config.extraMetadata.productName=ex-stg"
   },
   "devDependencies": {
     "@anthropic-ai/bedrock-sdk": "^0.32.4",
@@ -48,5 +51,8 @@
   },
   "optionalDependencies": {
     "windows-focus-assist": "^1.4.0"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.1042.0"
   }
 }

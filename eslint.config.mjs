@@ -13,4 +13,13 @@ export default [
       '@typescript-eslint/no-explicit-any': 'off',
     },
   },
+  {
+    // Plain-JS build/install scripts run under Node, not Electron or the DOM.
+    // They stay dependency-free (postinstall must work before devDependencies
+    // like tsx are usable), so they get Node globals rather than the TS setup.
+    files: ['scripts/**/*.{mjs,js}'],
+    languageOptions: {
+      globals: { console: 'readonly', process: 'readonly' },
+    },
+  },
 ];
