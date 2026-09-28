@@ -60,6 +60,15 @@ updates:
           - tsx
           - sharp
           - png-to-ico
+      # Every group above is a VERSION-update group: `applies-to` defaults to
+      # version-updates, and security advisories are not covered by it. Without
+      # the group below, each advisory opens its own PR — which is why
+      # fast-uri, postcss, js-yaml, brace-expansion, tar and undici each
+      # arrived separately while the named groups batched correctly.
+      npm-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   - package-ecosystem: github-actions
     directory: /
@@ -73,5 +82,9 @@ updates:
       - ci
     groups:
       actions:
+        patterns:
+          - "*"
+      actions-security:
+        applies-to: security-updates
         patterns:
           - "*"

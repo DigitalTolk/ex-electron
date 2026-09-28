@@ -4,6 +4,7 @@ import {
   Tray,
   Menu,
   clipboard,
+  ClipboardItem,
   dialog,
   ipcMain,
   Notification,
@@ -724,7 +725,17 @@ async function copyImage(rawUrl: string): Promise<void> {
     console.error('copy image: could not decode', rawUrl);
     return;
   }
-  clipboard.writeImage(bitmap);
+  // Electron 44 replaced the typed clipboard writers (writeImage/writeHTML/…)
+  // with the W3C-modelled async clipboard.write(ClipboardItem[]). Re-encoding
+  // through the decoded bitmap normalises whatever the server served (jpeg,
+  // webp) into the PNG that every platform clipboard accepts.
+  await clipboard.write([
+    // Buffer is typed as ArrayBufferLike, which BlobPart rejects because it
+    // admits SharedArrayBuffer; the copy narrows it to a plain ArrayBuffer.
+    new ClipboardItem({
+      'image/png': new Blob([new Uint8Array(bitmap.toPNG())], { type: 'image/png' }),
+    }),
+  ]);
 }
 
 function buildTrayMenu(): Menu {
