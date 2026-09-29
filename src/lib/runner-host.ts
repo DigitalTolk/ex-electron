@@ -1,13 +1,23 @@
-// Main-process host for the agent runner: token custody (safeStorage) and
-// runner lifecycle. This is the only file that couples the Electron shell to
+// Main-process host for the agent runner: token custody and runner
+// lifecycle. This is the only file that couples the Electron shell to
 // src/runner/ — the runner itself stays Electron-free.
-import { app, safeStorage } from 'electron';
+//
+// The runner token lives in MEMORY ONLY. It used to be encrypted to disk with
+// safeStorage so agents could come online before the SPA finished loading,
+// but that key lives in the login keychain: any build whose code signature
+// does not match the ACL that created the item makes macOS demand the
+// keychain password, which is not something to put in front of a user for a
+// token we can simply mint again. The SPA holds the session and re-mints on
+// every load, so there is nothing here worth persisting — and a 30-day
+// runner JWT no longer sits at rest on disk, which matters while per-token
+// revocation does not exist server-side.
+import { app } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 
 import { startRunner, type RunnerHandle } from '../runner';
 
-const TOKEN_FILE = 'runner-token.bin';
+const TOKEN_FILE = 'runner-token.bin'; // legacy: written by v0.0.16 only
 
 interface HostState {
   handle: RunnerHandle | null;
@@ -22,43 +32,25 @@ function tokenPath(): string {
   return path.join(app.getPath('userData'), TOKEN_FILE);
 }
 
-// persistToken encrypts with the OS keychain when available; a machine
-// without safeStorage (some Linux setups) keeps the token in memory only —
-// re-minted by the SPA on next launch, which is acceptable.
-function persistToken(token: string): void {
+// dropLegacyToken removes the encrypted token file v0.0.16 left behind. It
+// deletes the file WITHOUT decrypting it — reading it is what triggered the
+// keychain prompt — so upgrading users never see the dialog again. The
+// keychain item itself stays (safeStorage has no delete API); unused, it is
+// inert.
+export function dropLegacyToken(): void {
   try {
-    if (!safeStorage.isEncryptionAvailable()) return;
-    fs.writeFileSync(tokenPath(), safeStorage.encryptString(token));
-  } catch (err) {
-    console.error('runner token persist failed:', err);
-  }
-}
-
-function loadPersistedToken(): string | null {
-  try {
-    if (!safeStorage.isEncryptionAvailable()) return null;
-    const raw = fs.readFileSync(tokenPath());
-    return safeStorage.decryptString(raw);
+    fs.rmSync(tokenPath(), { force: true });
   } catch {
-    return null; // first boot, or the OS key changed
+    // best-effort
   }
 }
 
 // onRunnerToken handles a fresh token from the SPA (over the chat-preload
-// bridge): store it and (re)start the runner with it.
+// bridge): hold it and (re)start the runner with it. This is the ONLY way the
+// runner gets a token, so the runner comes online once a session exists — and
+// goes offline with it, which is what a signed-out user's agents should do.
 export function onRunnerToken(token: string, chatUrl: string): void {
   if (state.token === token && state.handle) return; // same token, running
-  state.token = token;
-  state.chatUrl = chatUrl;
-  persistToken(token);
-  void restartRunner();
-}
-
-// startFromPersisted boots the runner from a previously stored token so
-// agents come online with the app, before the SPA finishes loading.
-export function startFromPersisted(chatUrl: string): void {
-  const token = loadPersistedToken();
-  if (!token) return;
   state.token = token;
   state.chatUrl = chatUrl;
   void restartRunner();
@@ -94,21 +86,17 @@ async function restartRunner(): Promise<void> {
 }
 
 // stopRunner is called on app quit and on sign-out (a signed-out user's
-// agents must go offline).
+// agents must go offline). Dropping the in-memory token is the whole of it
+// now — nothing was written down.
 export async function stopRunner(): Promise<void> {
   const handle = state.handle;
   state.handle = null;
   state.token = null;
-  try {
-    fs.rmSync(tokenPath(), { force: true });
-  } catch {
-    // best-effort
-  }
   if (handle) await handle.stop().catch(() => {});
 }
 
-// pauseRunner stops execution without discarding the stored token (app quit,
-// server change) — next boot resumes from the persisted token.
+// pauseRunner stops execution but keeps the in-memory token (app quit, server
+// change) — the SPA re-mints on the next load either way.
 export async function pauseRunner(): Promise<void> {
   const handle = state.handle;
   state.handle = null;

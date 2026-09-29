@@ -45,7 +45,7 @@ import {
   type ConnectorSSORequest,
   type ConnectorSSOResult,
 } from './lib/connector-sso';
-import { onRunnerToken, pauseRunner, startFromPersisted, stopRunner } from './lib/runner-host';
+import { dropLegacyToken, onRunnerToken, pauseRunner, stopRunner } from './lib/runner-host';
 
 let isQuitting = false;
 
@@ -1216,9 +1216,10 @@ app.whenReady().then(() => {
   createTray();
   if (settings.chatUrl) {
     createChatWindow();
-    // Agents come online with the app: resume from the persisted runner
-    // token without waiting for the SPA to load and re-mint.
-    startFromPersisted(settings.chatUrl);
+    // Agents come online when the SPA hands a freshly minted token down —
+    // seconds later, and without a keychain prompt. Clear the token file
+    // v0.0.16 wrote so no build ever tries to decrypt it again.
+    dropLegacyToken();
   } else {
     createSetupWindow();
   }
