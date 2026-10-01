@@ -13,6 +13,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { promisify } from 'node:util';
 
+import { syncAuthIn, syncAuthOut } from '../codex-auth';
 import { describeToolUse } from '../describe-tool';
 import type { Assignment, RunOutcome } from '../types';
 import { flattenToolResult, killTree, runHasConnectors, systemRules } from './shared';
@@ -31,21 +32,38 @@ function tomlString(s: string): string {
 // config.toml carrying ONLY our MCP server + sandbox policy — never the
 // user's real ~/.codex, whose config could re-enable tools or other MCP
 // servers. The user's auth.json is COPIED in (CODEX_HOME is also where codex
-// looks for credentials; an empty home would log the user out of the run).
+// looks for credentials; an empty home would log the user out of the run) —
+// unless this thread's copy is fresher; codexAuthFiles + syncAuthOut hand a
+// refresh back afterwards (see codex-auth.ts).
 // The run token rides the config file inside the 0700 temp dir — never argv.
+function codexAuthFiles(home: string): { user: string; thread: string } {
+  const userHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+  return { user: path.join(userHome, 'auth.json'), thread: path.join(home, 'auth.json') };
+}
+
 function writeCodexHome(a: Assignment, opts: HarnessRunOptions): string {
   const home = path.join(opts.workDir, 'codex-home');
   fs.mkdirSync(home, { recursive: true, mode: 0o700 });
 
-  const userHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
-  const authSrc = path.join(userHome, 'auth.json');
+  const { user: authSrc, thread: authDst } = codexAuthFiles(home);
+  let seeded = false;
   try {
-    fs.copyFileSync(authSrc, path.join(home, 'auth.json'));
+    seeded = syncAuthIn(authSrc, authDst);
   } catch {
-    opts.log('codex: no auth.json found — run will rely on env auth if any', { authSrc });
+    // unreadable/unwritable — same outcome as none
   }
+  if (!seeded) opts.log('codex: no auth.json found — run will rely on env auth if any', { authSrc });
 
-  const env = opts.mcpServerCmd.env;
+  // The light tool index (tool-index.ts) is OPT-IN for codex. Measured
+  // 2026-09-30 on 9 real tasks: same accuracy (7/9) but only −11% input —
+  // codex already caches ~87% of its prompt — and it added failure modes
+  // (a catalogued tool not noticed; `name` passed for `tool`). Full
+  // definitions up front also mean codex always has a tool's whole contract
+  // before calling it.
+  const env = {
+    ...opts.mcpServerCmd.env,
+    ...(process.env.EX_RUNNER_TOOL_INDEX === '1' ? { EX_TOOL_INDEX: '1' } : {}),
+  };
   // Coding tasks need to edit files, install dependencies and run tests
   // inside the checkout: workspace-write (cwd = the checkout) with network.
   // Everything else stays read-only.
@@ -296,6 +314,14 @@ export function runCodex(a: Assignment, opts: HarnessRunOptions, sink: HarnessEv
         resolve({ ok: false, finalText: '', reason: `spawn_failed: ${err.message}`, usage });
       });
       child.on('close', (code) => {
+        // A refresh during the run rotated the token inside this thread's
+        // home; the user's file must get it or the next thread starts spent.
+        try {
+          const { user, thread } = codexAuthFiles(codexHome);
+          if (syncAuthOut(thread, user)) opts.log('codex: refreshed credentials written back', { user });
+        } catch (err) {
+          opts.log('codex: credential write-back failed', { error: String(err) });
+        }
         if (killedReason) {
           resolve({ ok: false, finalText: '', reason: killedReason, usage });
           return;

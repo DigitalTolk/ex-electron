@@ -110,6 +110,9 @@ describe('turnsFor', () => {
     expect(turnsFor(limits, 'direct')).toBe(40);
     expect(turnsFor(limits, undefined)).toBe(40);
     expect(turnsFor(limits, 'watch')).toBe(10);
+    // A scheduled standing order is explicit work, so it gets the DIRECT
+    // depth — an ambient budget would starve "pull the numbers and summarise".
+    expect(turnsFor(limits, 'scheduled')).toBe(40);
   });
   it('falls back to platform defaults when limits carry zeros', () => {
     expect(turnsFor({ maxTurns: 0, maxTaskTurns: 0 } as never, 'direct')).toBe(128);

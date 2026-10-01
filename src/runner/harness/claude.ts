@@ -8,7 +8,7 @@ import readline from 'node:readline';
 import { describeToolUse } from '../describe-tool';
 import { turnsFor } from '../types';
 import type { Assignment, RunOutcome } from '../types';
-import { flattenToolResult, killTree, runHasConnectors, systemRules } from './shared';
+import { claudeToolArgs, flattenToolResult, killTree, runHasConnectors, systemRules } from './shared';
 import type { HarnessEventSink, HarnessRunOptions, RunningHarness } from './shared';
 
 export type { HarnessEventSink, HarnessRunOptions, RunningHarness } from './shared';
@@ -43,6 +43,9 @@ const ALLOWED_TOOLS = [
   'mcp__ex__set_reminder',
   'mcp__ex__list_reminders',
   'mcp__ex__cancel_reminder',
+  'mcp__ex__list_schedules',
+  'mcp__ex__create_schedule',
+  'mcp__ex__delete_schedule',
   'mcp__ex__pin_message',
   'mcp__ex__notify_owner',
   'mcp__ex__propose_reply',
@@ -60,6 +63,11 @@ const ALLOWED_TOOLS = [
 ].join(',');
 
 const PERMISSION_PROMPT_TOOL = 'mcp__ex__approval_prompt';
+
+// Claude Code's OWN scheduling (session cron, claude.ai routines) knows
+// nothing about Ex: asked "what have I got scheduled?", an agent answered
+// "zero" from these. Ex's list/create/delete_schedule are the only schedule.
+const DISALLOWED_TOOLS = ['CronCreate', 'CronDelete', 'CronList', 'RemoteTrigger', 'ScheduleWakeup'].join(',');
 
 // request_approval legitimately blocks for minutes while a human decides —
 // the harness's own MCP tool timeout must sit ABOVE the orchestrator's
@@ -156,6 +164,9 @@ export function runClaude(a: Assignment, opts: HarnessRunOptions, sink: HarnessE
     '--strict-mcp-config',
     '--allowedTools',
     ALLOWED_TOOLS,
+    '--disallowedTools',
+    DISALLOWED_TOOLS,
+    ...claudeToolArgs(a),
     '--permission-prompt-tool',
     PERMISSION_PROMPT_TOOL,
     '--append-system-prompt',

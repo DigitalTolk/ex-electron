@@ -22,6 +22,7 @@ import { credentialHeader, fetchRunConnectors, syncConnectors } from './connecto
 import { describeToolUse } from './describe-tool';
 import { SpillStore, SPILL_FETCH_MAX } from './spill';
 import { taskPolicyAllows } from './task-policy';
+import { indexedTools, TOOL_CALL, TOOL_INFO, toolInfo, unwrapCall, type ToolDef } from './tool-index';
 import {
   branchHasChanges,
   createMergeRequest,
@@ -143,11 +144,11 @@ const GATED_HIDDEN = new Set([
   'propose_reply',
 ]);
 
-interface ToolDef {
-  name: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
-}
+// Index mode (EX_TOOL_INDEX=1, set for codex): advertise the core tools and a
+// catalog behind two meta-tools instead of all 43 definitions (tool-index.ts).
+const TOOL_INDEX = process.env.EX_TOOL_INDEX === '1';
+// Tools whose full contract this run has read (index mode runs only those).
+const describedTools = new Set<string>();
 
 // visibleTools is the advertised tool set for this run. Gated watchers get the
 // read/side-effect tools but none of the communication tools — delivery is the
@@ -624,6 +625,49 @@ const TOOLS: ToolDef[] = [
       type: 'object',
       properties: { reminder_id: { type: 'string' } },
       required: ['reminder_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'list_schedules',
+    description:
+      "List YOUR INVOKER's scheduled orders across every agent: [sch:<id>] agent — when → where — " +
+      'instruction. Use this, never a cron or routine feature of your own, when they ask what they ' +
+      'have scheduled.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'create_schedule',
+    description:
+      'Create a SCHEDULED ORDER for your invoker — an agent carries out `instruction` on a clock. ' +
+      '`schedule` is five-field cron (minute hour day-of-month month day-of-week), e.g. "0 9 * * 1-5" ' +
+      '= 09:00 on weekdays. `timezone` is IANA (e.g. Asia/Kolkata); it defaults to their profile ' +
+      'zone, or UTC if they have none, so pass it whenever they said a local time. `destination`: ' +
+      '"here" (default — this conversation), "dm" (a private DM to them) or a channel id [ch:<id>] ' +
+      "they're in. `agent` defaults to you. Only for recurring work they asked for; confirm the " +
+      'time back to them.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        instruction: { type: 'string', description: 'What the agent should do each time it fires.' },
+        schedule: { type: 'string', description: 'Five-field cron spec.' },
+        timezone: { type: 'string', description: 'IANA timezone, e.g. Asia/Kolkata.' },
+        destination: { type: 'string', description: '"here", "dm", or a channel id.' },
+        agent: { type: 'string', description: 'Agent slug to carry it out; defaults to you.' },
+        connectors: { type: 'array', items: { type: 'string' }, description: 'Connector slugs to pin.' },
+        skills: { type: 'array', items: { type: 'string' }, description: 'Skill ids [sk:<id>] to pin.' },
+      },
+      required: ['instruction', 'schedule'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'delete_schedule',
+    description: "Remove one of your invoker's scheduled orders by its [sch:<id>] from list_schedules.",
+    inputSchema: {
+      type: 'object',
+      properties: { schedule_id: { type: 'string' } },
+      required: ['schedule_id'],
       additionalProperties: false,
     },
   },
@@ -1555,6 +1599,32 @@ async function handleToolCall(name: string, args: Record<string, unknown>): Prom
       if (!res.ok) return toolResult(describeFailure(res.status, res.data), true);
       return toolResult(typeof res.data.text === 'string' ? res.data.text : 'reminder canceled');
     }
+    case 'list_schedules': {
+      const res = await callBackend('GET', '/api/v1/agent/run/schedules');
+      if (!res.ok) return toolResult(describeFailure(res.status, res.data), true);
+      return toolResult(typeof res.data.text === 'string' ? res.data.text : '(no scheduled orders)');
+    }
+    case 'create_schedule': {
+      const payload: Record<string, unknown> = {};
+      for (const k of ['instruction', 'schedule', 'timezone', 'destination', 'agent']) {
+        if (typeof args[k] === 'string' && args[k]) payload[k] = args[k];
+      }
+      if (!payload.instruction || !payload.schedule)
+        return toolResult('create_schedule requires instruction and schedule', true);
+      for (const k of ['connectors', 'skills']) {
+        if (Array.isArray(args[k])) payload[k] = (args[k] as unknown[]).filter((v) => typeof v === 'string');
+      }
+      const res = await callBackend('POST', '/api/v1/agent/run/schedules', payload);
+      if (!res.ok) return toolResult(describeFailure(res.status, res.data), true);
+      return toolResult(typeof res.data.text === 'string' ? res.data.text : 'scheduled');
+    }
+    case 'delete_schedule': {
+      const id = typeof args.schedule_id === 'string' ? args.schedule_id : '';
+      if (!id) return toolResult('delete_schedule requires schedule_id', true);
+      const res = await callBackend('DELETE', `/api/v1/agent/run/schedules/${encodeURIComponent(id)}`);
+      if (!res.ok) return toolResult(describeFailure(res.status, res.data), true);
+      return toolResult(typeof res.data.text === 'string' ? res.data.text : 'schedule removed');
+    }
     case 'pin_message': {
       const messageID = typeof args.message_id === 'string' ? args.message_id : '';
       if (!messageID) return toolResult('pin_message requires message_id', true);
@@ -1844,12 +1914,28 @@ async function handle(req: JsonRpcRequest): Promise<void> {
       reply(id, {});
       return;
     case 'tools/list':
-      reply(id, { tools: visibleTools() });
+      reply(id, { tools: TOOL_INDEX ? indexedTools(visibleTools()) : visibleTools() });
       return;
     case 'tools/call': {
       const params = req.params ?? {};
-      const name = typeof params.name === 'string' ? params.name : '';
-      const args = (params.arguments as Record<string, unknown> | undefined) ?? {};
+      let name = typeof params.name === 'string' ? params.name : '';
+      let args = (params.arguments as Record<string, unknown> | undefined) ?? {};
+      if (TOOL_INDEX && name === TOOL_INFO) {
+        reply(id, toolResult(toolInfo(visibleTools(), args.names, describedTools)));
+        return;
+      }
+      if (TOOL_INDEX && name === TOOL_CALL) {
+        const inner = unwrapCall(visibleTools(), args, describedTools);
+        if ('error' in inner) {
+          reply(id, toolResult(inner.error, true));
+          return;
+        }
+        if ('contract' in inner) {
+          reply(id, toolResult(inner.contract));
+          return;
+        }
+        ({ name, args } = inner);
+      }
       try {
         reply(id, applySpill(name, await handleToolCall(name, args)));
       } catch (err) {

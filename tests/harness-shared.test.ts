@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { flattenToolResult, runHasConnectors, systemRules } from '../src/runner/harness/shared';
+import { claudeToolArgs, flattenToolResult, LEAN_CLAUDE_TOOLS, runHasConnectors, systemRules } from '../src/runner/harness/shared';
 
 describe('flattenToolResult', () => {
   it('renders a string result with its size', () => {
@@ -47,5 +47,19 @@ describe('systemRules', () => {
     expect(systemRules('gg', 'Alice', 'p', { connectors: true })).toContain('connector_call is the ONLY way');
     // opts omitted entirely → the default-parameter branch, no connector rules.
     expect(systemRules('gg', 'Alice', 'p')).not.toContain('connector_call is the ONLY way');
+  });
+});
+
+describe('claudeToolArgs', () => {
+  it('trims a chat run to the lean toolset, keeping ToolSearch and a shell for every OS', () => {
+    const args = claudeToolArgs({}, {});
+    expect(args).toEqual(['--tools', LEAN_CLAUDE_TOOLS.join(','), '--disable-slash-commands']);
+    // Without ToolSearch every Ex MCP tool would load up front.
+    for (const needed of ['ToolSearch', 'Bash', 'PowerShell', 'Read']) expect(LEAN_CLAUDE_TOOLS).toContain(needed);
+  });
+
+  it('leaves coding tasks and explicit full-tool runs on the full set', () => {
+    expect(claudeToolArgs({ task: { id: 't' } as never }, {})).toEqual([]);
+    expect(claudeToolArgs({}, { EX_RUNNER_FULL_TOOLS: '1' })).toEqual([]);
   });
 });
