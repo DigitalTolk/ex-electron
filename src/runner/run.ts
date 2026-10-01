@@ -217,6 +217,30 @@ function modePreamble(a: Assignment): string {
       return watchPreamble(a);
     case 'heartbeat':
       return '[periodic check-in] ';
+    case 'scheduled': {
+      // A watcher decides whether the activity that woke it matters; a
+      // SCHEDULED order has no activity to judge — the clock woke it — so it
+      // carries the order out and always reports back. Silence here would
+      // look like a broken morning report, not a tactful no-op.
+      const order = (a.watchInstruction || '').trim();
+      let p =
+        '[scheduled order] A standing order you were given has come due on its schedule — nobody ' +
+        'just messaged you, so there is nothing to judge for relevance. Carry the order out now ' +
+        'and deliver the result. If there is genuinely nothing to report, say that in one line ' +
+        'rather than ending silently.\n';
+      if (order) {
+        // Always-attached skills (a thread-tldr, say) ride every run; with no
+        // triggering message the model took one for the order itself and
+        // summarised an empty thread instead of doing what was asked.
+        p +=
+          `\n# Standing order from ${a.invokerName}\n${order}\n` +
+          'This order is the task. Attached skills are optional tools — use one only if it helps ' +
+          'carry the order out, and never in place of it. Deliver the result HERE, as your reply ' +
+          'in this conversation — not by DM or in another channel — unless the order itself names ' +
+          'somewhere else.\n';
+      }
+      return p + '\n';
+    }
     case 'followup': {
       // Keep follow-ups CHEAP: decide relevance first, before any tool use.
       let p =
@@ -303,7 +327,12 @@ export async function executeAssignment(a: Assignment, deps: ExecuteDeps): Promi
     return;
   }
 
-  const canResume = (a.harness === 'claude' || a.harness === 'codex') && !!deps.stateDir;
+  // A scheduled firing starts cold: it is self-contained (the order says what
+  // to do), and resuming made every firing re-send all earlier firings' turns
+  // — hours apart, so the prompt cache had always expired and the whole
+  // history was re-written at full price, growing every day.
+  const canResume =
+    (a.harness === 'claude' || a.harness === 'codex') && !!deps.stateDir && a.mode !== 'scheduled';
   let session = canResume ? getSession(a) : null;
   // Sessions are bound to their cwd (claude ties sessions to it; codex keeps
   // its rollout in the per-thread CODEX_HOME inside it) — a resumable thread

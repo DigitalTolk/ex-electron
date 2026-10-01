@@ -104,6 +104,24 @@ export function runHasConnectors(a: Pick<Assignment, 'connectorSlugs' | 'context
 // connectorRules is the workflow that used to be repeated in every connector's
 // _USAGE.md (77 lines, ~87% identical across services) and read by the agent
 // as a tool turn on every attach. Stated once here; the per-connector part
+// LEAN_CLAUDE_TOOLS is the built-in toolset a CHAT run gets. Claude Code's
+// full set (Edit, Write, sub-agents, notebooks, todo lists…) cost ~11.7k
+// tokens on every call, and chat runs only ever used Bash and Read. ToolSearch
+// must stay: it is what keeps Ex's own MCP tools deferred (names only, loaded
+// on demand) — without it all 43 load up front. Measured 2026-09-30 on
+// Claude Code 2.1.223: 28.5k → 8.4k fixed context. PowerShell is Windows'
+// shell tool (Bash needs Git Bash there); a name a platform lacks is ignored.
+export const LEAN_CLAUDE_TOOLS = ['Bash', 'PowerShell', 'Read', 'Grep', 'Glob', 'ToolSearch', 'WebFetch', 'WebSearch'];
+
+// claudeToolArgs trims Claude Code for chat runs. Coding tasks keep the full
+// set — they edit files. --disable-slash-commands drops the CLI user's own
+// skills listing (~2.8k tokens, and never meant for an agent run).
+// EX_RUNNER_FULL_TOOLS=1 restores the full set, for comparison runs.
+export function claudeToolArgs(a: Pick<Assignment, 'task'>, env: NodeJS.ProcessEnv = process.env): string[] {
+  if (a.task || env.EX_RUNNER_FULL_TOOLS === '1') return [];
+  return ['--tools', LEAN_CLAUDE_TOOLS.join(','), '--disable-slash-commands'];
+}
+
 // (the service map) rides the use_connector result instead.
 function connectorRules(): string[] {
   return [

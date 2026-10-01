@@ -25,7 +25,9 @@ export function turnsFor(limits: AgentLimits, mode: string | undefined): number 
   // Coding-task runs are uncapped by decision (plan-coding-agent.md): 0 means
   // "pass no --max-turns"; the server's rolling idle deadline is the reaper.
   if (mode === 'task') return 0;
-  if (mode === 'direct' || !mode) return limits.maxTaskTurns || 128;
+  // 'scheduled' mirrors 'direct': a standing order ("pull yesterday's numbers
+  // and summarize") is explicit work with real tool calls, not an idle glance.
+  if (mode === 'direct' || mode === 'scheduled' || !mode) return limits.maxTaskTurns || 128;
   return limits.maxTurns || 16;
 }
 
