@@ -53,6 +53,6 @@
     "windows-focus-assist": "^1.4.0"
   },
   "dependencies": {
-    "@aws-sdk/client-bedrock-runtime": "^3.1141.0"
+    "@aws-sdk/client-bedrock-runtime": "^3.1142.0"
   }
 }
