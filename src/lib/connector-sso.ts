@@ -37,6 +37,14 @@ export interface ConnectorSSORequest {
   startURL: string;
   capturePattern?: string;
   apiOrigin?: string;
+  // captureCookie names a session cookie to lift out of the sign-in window
+  // once the service sets it — the credential for a service that issues a
+  // SESSION rather than a token (Microsoft login, auth-code flow completed
+  // server-side, cookie set on the service's own origin). Nothing lands in a
+  // URL and no Authorization header is ever sent, so neither capturePattern
+  // nor the bearer fallback can see it. The cookie is typically HttpOnly,
+  // which is exactly why users otherwise have to dig it out of DevTools.
+  captureCookie?: string;
 }
 
 // What the shell answers with. Main always RESOLVES the invoke with one of
@@ -169,6 +177,15 @@ export function tokenFromCaptureURL(url: string, pattern?: string): string | nul
   } catch {
     return raw;
   }
+}
+
+// cookieCaptureName validates the configured cookie name before it reaches
+// Electron's cookie API: a cookie name is an HTTP token, and anything else is
+// a misconfiguration we refuse rather than pass through.
+export function cookieCaptureName(raw?: string): string | null {
+  const name = (raw ?? '').trim();
+  if (!name || !/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name)) return null;
+  return name;
 }
 
 // bearerFromAuthHeader pulls the bearer out of a request's headers — the

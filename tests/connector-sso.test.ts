@@ -6,7 +6,7 @@ import {
   CONNECTOR_SSO_REQUEST_EVENT,
   CONNECTOR_SSO_RESULT_ATTR,
   CONNECTOR_SSO_RESULT_EVENT,
-  bearerFromAuthHeader,
+  bearerFromAuthHeader, cookieCaptureName,
   installConnectorSSOAnswerer,
   scrubbedUserAgent,
   tokenFromCaptureURL,
@@ -324,5 +324,18 @@ describe('scrubbedUserAgent', () => {
 
   it('escapes regex metacharacters in the app name', () => {
     expect(scrubbedUserAgent('Mozilla/5.0 ex+stg/1.0 Chrome/1.0', 'ex+stg')).toBe('Mozilla/5.0 Chrome/1.0');
+  });
+});
+
+describe('cookieCaptureName', () => {
+  it('accepts a cookie name and refuses anything that is not an HTTP token', () => {
+    expect(cookieCaptureName('connect.sid')).toBe('connect.sid');
+    expect(cookieCaptureName('  session_id  ')).toBe('session_id');
+    // A misconfigured name would otherwise reach Electron's cookie API, where
+    // a stray ; or = turns one cookie lookup into another.
+    expect(cookieCaptureName('connect.sid; HttpOnly')).toBeNull();
+    expect(cookieCaptureName('a=b')).toBeNull();
+    expect(cookieCaptureName('')).toBeNull();
+    expect(cookieCaptureName(undefined)).toBeNull();
   });
 });

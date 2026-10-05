@@ -40,6 +40,7 @@ import { RUNNER_TOKEN_IPC_CHANNEL } from './lib/runner-bridge';
 import {
   CONNECTOR_SSO_IPC,
   bearerFromAuthHeader,
+  cookieCaptureName,
   scrubbedUserAgent,
   tokenFromCaptureURL,
   type ConnectorSSORequest,
@@ -1024,7 +1025,7 @@ const CONNECTOR_SSO_PARTITION = 'persist:ex-connector-sso';
 const CONNECTOR_SSO_TIMEOUT_MS = 5 * 60_000;
 let connectorSSOWindow: BrowserWindow | null = null;
 
-function runConnectorSSOCapture(startURL: string, capturePattern?: string, apiOrigin?: string): Promise<ConnectorSSOResult> {
+function runConnectorSSOCapture(startURL: string, capturePattern?: string, apiOrigin?: string, captureCookie?: string): Promise<ConnectorSSOResult> {
   const ses = session.fromPartition(CONNECTOR_SSO_PARTITION);
   // Microsoft's sign-in refuses user agents it classifies as embedded
   // browsers; the same Chromium minus the Electron and app tokens is accepted.
@@ -1053,6 +1054,7 @@ function runConnectorSSOCapture(startURL: string, capturePattern?: string, apiOr
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearInterval(cookiePoll);
       ses.webRequest.onBeforeSendHeaders(null);
       connectorSSOWindow = null;
       if (!win.isDestroyed()) win.destroy();
@@ -1070,13 +1072,57 @@ function runConnectorSSOCapture(startURL: string, capturePattern?: string, apiOr
     };
     win.webContents.on('will-redirect', (e, url) => tryURL(url, e));
     win.webContents.on('will-navigate', (e, url) => tryURL(url, e));
-    win.webContents.on('did-navigate', (_e, url) => tryURL(url));
+    win.webContents.on('did-navigate', (_e, url) => {
+      noteNavigation(url);
+      tryURL(url);
+    });
     // Some services end their flow by redirecting to a loopback URL meant for
     // a local listener (127.0.0.1:<port>/callback?token=…). Nothing listens
     // there in our case, so if the redirect ever commits before will-redirect
     // cancels it, the failed load still names the URL — and the token is in it.
-    win.webContents.on('did-redirect-navigation', (_e, url) => tryURL(url));
+    win.webContents.on('did-redirect-navigation', (_e, url) => {
+      noteNavigation(url);
+      tryURL(url);
+    });
     win.webContents.on('did-fail-load', (_e, _code, _desc, validatedURL) => tryURL(validatedURL));
+
+    // Cookie capture: for a service that ends its Microsoft round-trip by
+    // setting a SESSION cookie on its own origin, nothing ever appears in a
+    // URL or an Authorization header. Poll the window's own cookie jar
+    // instead — Electron reads HttpOnly cookies that page JS cannot, which is
+    // the whole reason this beats asking a user for DevTools. The value is
+    // passed through RAW: express-session stores a signed "s%3A…" string and
+    // decoding it would produce a cookie the service rejects.
+    const cookieName = cookieCaptureName(captureCookie);
+    const cookieURL = apiOrigin || safeUrl(startURL)?.origin || '';
+    // A session cookie usually exists BEFORE the user signs in: a server that
+    // keeps OAuth state (CSRF token, PKCE verifier) in the session sets one on
+    // the very first request, while the visitor is still anonymous. Capturing
+    // that one closes the window before the person has typed anything and
+    // hands Ex a session the service then rejects. So the cookie is only read
+    // after the window has gone out to the identity provider and come BACK —
+    // the shape of every SSO round-trip, with no path to hardcode.
+    let leftForIdP = false;
+    let armed = false;
+    const noteNavigation = (url: string) => {
+      const origin = safeUrl(url)?.origin;
+      if (!origin || !cookieURL) return;
+      if (origin !== cookieURL) {
+        leftForIdP = true;
+        return;
+      }
+      if (leftForIdP) armed = true;
+    };
+    const readCookie = () => {
+      if (!cookieName || !cookieURL || !armed) return;
+      ses.cookies
+        .get({ url: cookieURL, name: cookieName })
+        .then(([c]) => {
+          if (c?.value) settle({ ok: true, token: c.value });
+        })
+        .catch(() => {});
+    };
+    const cookiePoll = cookieName && cookieURL ? setInterval(readCookie, 700) : (undefined as unknown as NodeJS.Timeout);
 
     // Fallback capture: the signed-in app's first bearer call to its own API.
     if (apiOrigin) {
@@ -1088,7 +1134,14 @@ function runConnectorSSOCapture(startURL: string, capturePattern?: string, apiOr
     }
 
     win.on('closed', () => settle({ ok: false, error: 'sign-in window was closed' }));
-    win.loadURL(startURL).catch(() => settle({ ok: false, error: 'could not open the sign-in page' }));
+    // A stale cookie from an earlier capture would resolve instantly and hand
+    // back a session the user did not just sign into — clear it first.
+    const started = cookieName && cookieURL
+      ? ses.cookies.remove(cookieURL, cookieName).catch(() => {})
+      : Promise.resolve();
+    void started.then(() =>
+      win.loadURL(startURL).catch(() => settle({ ok: false, error: 'could not open the sign-in page' })),
+    );
   });
 }
 
@@ -1108,7 +1161,8 @@ ipcMain.handle(CONNECTOR_SSO_IPC, (event, raw: unknown): Promise<ConnectorSSORes
   }
   const capturePattern = typeof req.capturePattern === 'string' && req.capturePattern ? req.capturePattern : undefined;
   const apiOrigin = typeof req.apiOrigin === 'string' ? safeUrl(req.apiOrigin)?.origin : undefined;
-  return runConnectorSSOCapture(start.toString(), capturePattern, apiOrigin);
+  const captureCookie = typeof req.captureCookie === 'string' ? req.captureCookie : undefined;
+  return runConnectorSSOCapture(start.toString(), capturePattern, apiOrigin, captureCookie);
 });
 
 ipcMain.on('notification:activated', (event) => {
