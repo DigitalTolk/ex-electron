@@ -458,6 +458,34 @@ const TOOLS: ToolDef[] = [
     },
   },
   {
+    name: 'reconnect_connector',
+    description:
+      'Ask your invoker to reconnect a connector whose session or token has expired. This CHECKS the ' +
+      'connector first: if it is still working you are told so — say that rather than sending them to ' +
+      're-do a sign-in they do not need. You cannot reconnect anything yourself; the credential is ' +
+      'theirs and renewing it means them signing in. Use it when a connector you need is missing from ' +
+      'the task or its calls come back 401/403. Nothing opens on their screen by itself: the sign-in ' +
+      'happens in Connectors, so tell them to go there and press Reconnect.',
+    inputSchema: {
+      type: 'object',
+      properties: { connector: { type: 'string', description: 'Connector slug, e.g. cliffhub.' } },
+      required: ['connector'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'disconnect_connector',
+    description:
+      "Remove your invoker's connection to a connector. Only when they ask for it — it stops every " +
+      'agent using that service for them, and reconnecting means them signing in again.',
+    inputSchema: {
+      type: 'object',
+      properties: { connector: { type: 'string', description: 'Connector slug, e.g. cliffhub.' } },
+      required: ['connector'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'propose_reply',
     description:
       'Draft a reply for your CREATOR to approve, edit, or cancel — the reply-mode watcher path. ' +
@@ -1371,6 +1399,15 @@ async function handleToolCall(name: string, args: Record<string, unknown>): Prom
       const res = await callBackend('GET', `/api/v1/agent/run/users?q=${encodeURIComponent(query)}`);
       if (!res.ok) return toolResult(describeFailure(res.status, res.data), true);
       return toolResult(typeof res.data.text === 'string' ? res.data.text : '(no matching users)');
+    }
+    case 'reconnect_connector':
+    case 'disconnect_connector': {
+      const connector = typeof args.connector === 'string' ? args.connector.trim() : '';
+      if (!connector) return toolResult(`${name} requires connector`, true);
+      const action = name === 'reconnect_connector' ? 'reconnect' : 'disconnect';
+      const res = await callBackend('POST', `/api/v1/agent/run/connectors/${action}`, { connector });
+      if (!res.ok) return toolResult(describeFailure(res.status, res.data), true);
+      return toolResult(typeof res.data.text === 'string' ? res.data.text : `${action}ed`);
     }
     case 'send_dm': {
       const userID = typeof args.userID === 'string' ? args.userID : '';
