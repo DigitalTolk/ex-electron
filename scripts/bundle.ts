@@ -3,13 +3,17 @@
 // available; preload + main are bundled too for consistency. Type-checking
 // happens separately via `tsc --noEmit`.
 import { build } from 'esbuild';
-import { copyFile, mkdir } from 'node:fs/promises';
+import { copyFile, mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 
 const root = process.cwd();
 const out = path.join(root, 'dist');
 
 async function run(): Promise<void> {
+  // Start from an empty dist/: electron-builder packs all of dist/**, so a
+  // file an older bundle produced (e.g. the runner's mcp-server.js) would
+  // otherwise ship forever.
+  await rm(out, { recursive: true, force: true });
   // Main + preloads run in Electron's Node-side processes; Electron 41/42
   // both ship Node 24, so target that for accurate language-feature emit.
   await build({
@@ -17,10 +21,6 @@ async function run(): Promise<void> {
       main: path.join(root, 'src/main.ts'),
       preload: path.join(root, 'src/preload.ts'),
       'chat-preload': path.join(root, 'src/chat-preload.ts'),
-      // The local MCP stdio server the harness CLI spawns per agent run. It
-      // runs under the Electron binary with ELECTRON_RUN_AS_NODE=1, so it's a
-      // plain Node bundle with no Electron imports.
-      'mcp-server': path.join(root, 'src/runner/mcp-server.ts'),
     },
     outdir: out,
     bundle: true,

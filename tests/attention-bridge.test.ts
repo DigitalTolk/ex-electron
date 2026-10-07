@@ -5,14 +5,8 @@ import {
   ATTENTION_REQUEST_EVENT,
   installAttentionAnswerer,
 } from '../src/lib/attention-bridge';
-import {
-  RUNNER_BRIDGE_SOURCE,
-  RUNNER_TOKEN_ATTR,
-  RUNNER_TOKEN_EVENT,
-  installRunnerTokenListener,
-} from '../src/lib/runner-bridge';
 
-// Minimal fake for the shared DOM the bridges cross (same pattern as the
+// Minimal fake for the shared DOM the bridge crosses (same pattern as the
 // approval/DnD bridge tests).
 function makeFakeDoc() {
   const listeners = new Map<string, Set<() => void>>();
@@ -33,37 +27,6 @@ function makeFakeDoc() {
   };
   return { doc: doc as unknown as Document, raw: doc, attrs };
 }
-
-describe('runner token bridge (preload half)', () => {
-  it('reads the stamped token, scrubs it from the DOM, forwards it to main', () => {
-    const { doc, raw, attrs } = makeFakeDoc();
-    const sent: string[] = [];
-    installRunnerTokenListener(doc, (t) => sent.push(t));
-
-    attrs.set(RUNNER_TOKEN_ATTR, 'tok-abc');
-    raw.dispatchEvent({ type: RUNNER_TOKEN_EVENT });
-
-    expect(sent).toEqual(['tok-abc']);
-    // The token never lingers in the DOM.
-    expect(attrs.has(RUNNER_TOKEN_ATTR)).toBe(false);
-  });
-
-  it('ignores a token event with nothing stamped', () => {
-    const { doc, raw } = makeFakeDoc();
-    const sent: string[] = [];
-    installRunnerTokenListener(doc, (t) => sent.push(t));
-    raw.dispatchEvent({ type: RUNNER_TOKEN_EVENT });
-    expect(sent).toEqual([]);
-  });
-
-  it('page-side source stamps the attribute and validates the token shape', () => {
-    // The injected source references the same attr/event names the listener
-    // reads — a rename on one side must fail this.
-    expect(RUNNER_BRIDGE_SOURCE).toContain(RUNNER_TOKEN_ATTR);
-    expect(RUNNER_BRIDGE_SOURCE).toContain(RUNNER_TOKEN_EVENT);
-    expect(RUNNER_BRIDGE_SOURCE).toContain('length > 4096');
-  });
-});
 
 describe('attention bridge (preload half)', () => {
   it('forwards each page request to main', () => {

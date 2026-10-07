@@ -14,11 +14,6 @@ import {
   type ApprovalDecision,
 } from './lib/approval-bridge';
 import {
-  RUNNER_BRIDGE_SOURCE,
-  RUNNER_TOKEN_IPC_CHANNEL,
-  installRunnerTokenListener,
-} from './lib/runner-bridge';
-import {
   CONNECTOR_SSO_BRIDGE_SOURCE,
   CONNECTOR_SSO_IPC,
   installConnectorSSOAnswerer,
@@ -70,16 +65,6 @@ installApprovalAnswerer(
   (payload) => ipcRenderer.invoke(APPROVAL_NOTIFY_IPC, payload),
   (relay) => ipcRenderer.on(APPROVAL_DECIDED_IPC, (_event, decision: ApprovalDecision) => relay(decision)),
 );
-
-// Agent-runner token handoff: the SPA mints the runner-scoped token (it
-// holds the interactive session) and hands it to the shell, which runs the
-// local agent harness. Same shared-DOM crossing as the DnD bridge.
-webFrame.executeJavaScript(RUNNER_BRIDGE_SOURCE).catch((err) => {
-  console.error('runner bridge failed:', err);
-});
-installRunnerTokenListener(document, (token) => {
-  ipcRenderer.send(RUNNER_TOKEN_IPC_CHANNEL, token);
-});
 
 // Connector one-click SSO: the SPA asks the shell to open a service's own
 // sign-in window (the user authenticates with Microsoft there) and resolves

@@ -36,7 +36,6 @@ import {
   type ApprovalDecision,
   type ApprovalNotifyPayload,
 } from './lib/approval-bridge';
-import { RUNNER_TOKEN_IPC_CHANNEL } from './lib/runner-bridge';
 import {
   CONNECTOR_SSO_IPC,
   bearerFromAuthHeader,
@@ -45,7 +44,6 @@ import {
   type ConnectorSSORequest,
   type ConnectorSSOResult,
 } from './lib/connector-sso';
-import { dropLegacyToken, onRunnerToken, pauseRunner, stopRunner } from './lib/runner-host';
 
 let isQuitting = false;
 
@@ -62,15 +60,15 @@ if (!app.isPackaged) {
 // Dev builds run under their own identity. The single-instance lock below is
 // keyed to userData, so without this a packaged install and a dev build fight
 // over ONE lock — launching the second just focuses the first. A separate
-// userData dir also keeps dev settings, login, and runner state (runner-id,
-// token, warm-session cache) from clobbering the real install's.
+// userData dir also keeps dev settings and login from clobbering the real
+// install's.
 if (!app.isPackaged) {
   app.setName('ex-dev');
-  // EX_PROFILE gives each dev launch its OWN userData dir (session, login,
-  // runner identity) AND its own single-instance lock — so two instances can
-  // run side by side signed in as different users:
-  //   EX_PROFILE=alice npm start   # own window, own runner
-  //   EX_PROFILE=bob   npm start   # separate window + runner
+  // EX_PROFILE gives each dev launch its OWN userData dir (session, login)
+  // AND its own single-instance lock — so two instances can run side by side
+  // signed in as different users:
+  //   EX_PROFILE=alice npm start   # own window
+  //   EX_PROFILE=bob   npm start   # separate window
   // No EX_PROFILE keeps the default 'ex-dev' profile.
   const profile = process.env.EX_PROFILE ? `ex-dev-${process.env.EX_PROFILE.replace(/[^a-z0-9_-]/gi, '')}` : 'ex-dev';
   app.setName(profile);
@@ -901,9 +899,6 @@ function buildOverlayIcon(count: number): NativeImage | null {
 
 async function signOut(): Promise<void> {
   if (!settings.chatUrl) return;
-  // A signed-out user's agents must go offline, and the stored runner token
-  // dies with the session.
-  await stopRunner();
   const ses = session.fromPartition(CHAT_PARTITION);
   try {
     await ses.clearStorageData({
@@ -959,15 +954,6 @@ function fromChatWindow(event: Electron.IpcMainEvent | Electron.IpcMainInvokeEve
 ipcMain.handle(DND_IPC_CHANNEL, (event) => {
   if (!fromChatWindow(event)) return false;
   return getDndState();
-});
-
-// Agent-runner token from the SPA (via the chat-preload bridge). Guarded to
-// the chat window like every other chat-originated channel.
-ipcMain.on(RUNNER_TOKEN_IPC_CHANNEL, (event, token: unknown) => {
-  if (!fromChatWindow(event)) return;
-  if (typeof token !== 'string' || !token || token.length > 4096) return;
-  if (!settings.chatUrl) return;
-  onRunnerToken(token, settings.chatUrl);
 });
 
 ipcMain.on('connection:offline', (event) => {
@@ -1198,9 +1184,6 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
-  // Stop claiming and let in-flight leases lapse server-side; the token
-  // stays persisted so agents come back online on next launch.
-  void pauseRunner();
 });
 
 // Waking from sleep is the most common way the chat WebSocket dies silently:
@@ -1216,10 +1199,6 @@ app.whenReady().then(() => {
   createTray();
   if (settings.chatUrl) {
     createChatWindow();
-    // Agents come online when the SPA hands a freshly minted token down —
-    // seconds later, and without a keychain prompt. Clear the token file
-    // v0.0.16 wrote so no build ever tries to decrypt it again.
-    dropLegacyToken();
   } else {
     createSetupWindow();
   }
