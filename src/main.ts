@@ -23,6 +23,7 @@ import fs from 'node:fs';
 import { loadSettings, saveSettings, type Settings } from './lib/settings';
 import { safeUrl, trimTrailingSlash, isHttpUrl, isSameHost } from './lib/url';
 import { imageFilename, uniqueDownloadPath } from './lib/download';
+import { spellingMenuItems } from './lib/spelling';
 import { parseUnreadCount } from './lib/title';
 import { overlayBadgeSvg } from './lib/overlay';
 import { AUTH_CALLBACK_HTML } from './lib/auth-callback';
@@ -567,9 +568,15 @@ function chatContextMenuItems(
   params: ContextMenuParams,
   imageUrl: string | null,
 ): MenuItemConstructorOptions[] {
-  const items: MenuItemConstructorOptions[] = [];
+  // Spelling first, like the browser's menu: suggestions for a misspelled
+  // word in a text field, then Learn Spelling.
+  const items: MenuItemConstructorOptions[] = spellingMenuItems(params, {
+    replace: (suggestion) => chatWindow?.webContents.replaceMisspelling(suggestion),
+    learn: (word) => chatWindow?.webContents.session.addWordToSpellCheckerDictionary(word),
+  });
 
   if (params.linkURL) {
+    if (items.length > 0) items.push({ type: 'separator' });
     items.push({
       label: 'Copy link',
       click: () => clipboard.writeText(params.linkURL),
