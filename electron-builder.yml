@@ -29,6 +29,12 @@ mac:
   # set to the static icon.icns as a fallback for older systems.
   extendInfo:
     CFBundleIconName: AppIcon
+    # Notifications default to persistent "Alerts" (stay until dismissed or
+    # clicked, like Mattermost) instead of "Banners" that slide away after a
+    # few seconds. macOS reads this when the app first registers; a user who
+    # already changed the style keeps their choice (System Settings >
+    # Notifications > Ex).
+    NSUserNotificationAlertStyle: alert
   extraResources:
     - from: prebuilt/Assets.car
       to: Assets.car
