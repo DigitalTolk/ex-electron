@@ -20,6 +20,7 @@
     "start": "npm run bundle && electron .",
     "dist": "npm run build && tsx scripts/build-app.ts",
     "dist:mac": "npm run build && tsx scripts/build-app.ts --mac --arm64",
+    "dist:mas": "npm run build && tsx scripts/build-mas.ts",
     "dist:linux": "npm run build && tsx scripts/build-app.ts --linux --x64 --arm64",
     "dist:win": "npm run build && tsx scripts/build-app.ts --win --x64 --arm64",
     "dist:all": "npm run build && tsx scripts/build-app.ts --mac --arm64 --linux --x64 --arm64 --win --x64 --arm64",

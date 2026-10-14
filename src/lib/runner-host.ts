@@ -50,6 +50,10 @@ export function dropLegacyToken(): void {
 // runner gets a token, so the runner comes online once a session exists — and
 // goes offline with it, which is what a signed-out user's agents should do.
 export function onRunnerToken(token: string, chatUrl: string): void {
+  // The Mac App Store build runs in the app sandbox, which cannot launch the
+  // harness CLIs the runner drives. Agents stay off there; the direct-download
+  // build keeps them.
+  if (process.mas) return;
   if (state.token === token && state.handle) return; // same token, running
   state.token = token;
   state.chatUrl = chatUrl;

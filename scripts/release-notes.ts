@@ -7,6 +7,10 @@
 //
 // Always appends a "Full changelog" compare URL pointing at the GitHub repo.
 // Wired into release.yml's GitHub Release step via body_path.
+//
+// `--store` writes the Mac App Store "What's New" text instead: a few plain
+// user-facing bullets (the field shows no Markdown, holds at most 4000
+// characters, and must not mention commits or tooling).
 import { execFileSync } from 'node:child_process';
 import { AnthropicBedrock } from '@anthropic-ai/bedrock-sdk';
 
@@ -55,14 +59,30 @@ function commitsBetween(prev: string | null, tag: string): string {
   return git(['log', range, '--pretty=format:- %s (%h)']);
 }
 
-async function summariseWithClaude(commits: string, tag: string): Promise<string | null> {
-  // The Bedrock SDK auto-reads AWS_BEARER_TOKEN_BEDROCK (long-term Bedrock API
-  // key). If it isn't set, fall back to the plain commit list so the release
-  // workflow keeps working.
-  if (!process.env.AWS_BEARER_TOKEN_BEDROCK) {
-    return null;
-  }
-  const prompt = `You are writing release notes for ex-electron, a desktop chat client built on Electron.
+const STORE_MAX_CHARS = 3800;
+const STORE_FALLBACK = '- Bug fixes and performance improvements.';
+
+function storePrompt(commits: string, tag: string): string {
+  return `You are writing Mac App Store release notes for ex Team Chat, a desktop team chat app.
+
+Generate concise, user-facing release notes from this commit list.
+
+Rules:
+- Output only the release notes text, plain text with "- " bullets. No headings, no Markdown emphasis.
+- Use 2 to 5 short bullets.
+- Prefer concrete user-visible changes.
+- Do not mention commits, hashes, pull requests, CI, internal file names, developer tooling or AI agents.
+- Skip pure maintenance unless it affects users.
+- If the context is mostly maintenance, output one bullet: "Bug fixes and performance improvements."
+
+Tag being released: ${tag}
+
+Commits since previous tag:
+${commits}`;
+}
+
+function githubPrompt(commits: string, tag: string): string {
+  return `You are writing release notes for ex-electron, a desktop chat client built on Electron.
 
 Output GitHub-flavored Markdown. Generate concise notes from this commit list, following these rules:
 - Group into sections using level-3 headings: ### Features, ### Fixes, ### Internal. Only include sections that have entries.
@@ -77,6 +97,15 @@ Tag being released: ${tag}
 
 Commits since previous tag:
 ${commits}`;
+}
+
+async function summariseWithClaude(prompt: string): Promise<string | null> {
+  // The Bedrock SDK auto-reads AWS_BEARER_TOKEN_BEDROCK (long-term Bedrock API
+  // key). If it isn't set, fall back to the plain commit list so the release
+  // workflow keeps working.
+  if (!process.env.AWS_BEARER_TOKEN_BEDROCK) {
+    return null;
+  }
 
   try {
     const awsRegion = envOr(process.env.AWS_REGION, envOr(process.env.AWS_DEFAULT_REGION, DEFAULT_AWS_REGION));
@@ -125,8 +154,14 @@ async function main(): Promise<void> {
   const prev = previousTag(tag);
   const commits = commitsBetween(prev, tag);
 
+  if (process.argv.includes('--store')) {
+    const notes = (await summariseWithClaude(storePrompt(commits, tag))) ?? STORE_FALLBACK;
+    process.stdout.write(notes.slice(0, STORE_MAX_CHARS).trimEnd() + '\n');
+    return;
+  }
+
   let body: string;
-  const ai = await summariseWithClaude(commits, tag);
+  const ai = await summariseWithClaude(githubPrompt(commits, tag));
   if (ai) {
     body = ai;
   } else {

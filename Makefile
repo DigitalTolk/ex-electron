@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: help install regen-icons dev typecheck lint test bundle build clean dist dist-mac dist-linux dist-win
+.PHONY: help install regen-icons dev typecheck lint test bundle build clean dist dist-mac dist-mas dist-linux dist-win
 
 help:
 	@echo "Targets:"
@@ -14,6 +14,8 @@ help:
 	@echo "  build          typecheck + lint + bundle"
 	@echo "  dev            launch the app from source"
 	@echo "  dist-mac       package macOS arm64 (.dmg + .zip)"
+	@echo "  dist-mas       package the Mac App Store build (.pkg; needs APPLE_TEAM_ID,"
+	@echo "                 MAS_PROVISIONING_PROFILE_BASE64 and the CSC_* certificates)"
 	@echo "  dist-linux     package Linux amd64 + arm64 (.AppImage + .deb)"
 	@echo "  dist-win       package Windows amd64 + arm64 (.exe + .zip)"
 	@echo "  dist           package all targets"
@@ -52,6 +54,9 @@ dev:
 # `npm run dist:mac` directly, which uses the real signing flow.
 dist-mac:
 	CSC_IDENTITY_AUTO_DISCOVERY=false npm run dist:mac -- --config.mac.notarize=false
+
+dist-mas:
+	npm run dist:mas
 
 dist-linux:
 	npm run dist:linux
