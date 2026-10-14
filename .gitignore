@@ -11,3 +11,6 @@ release/
 coverage/
 *.tsbuildinfo
 .DS_Store
+# Mac App Store signing inputs written by scripts/build-mas.ts
+prebuilt/mas/
+fastlane/report.xml

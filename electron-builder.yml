@@ -33,6 +33,23 @@ mac:
     - from: prebuilt/Assets.car
       to: Assets.car
 
+# Mac App Store. Inherits the `mac` block (icon, category, Assets.car) and
+# swaps Developer ID + hardened runtime for the store's sandbox + Mac App
+# Distribution signing. scripts/build-mas.ts writes prebuilt/mas/ (gitignored)
+# from the entitlements template and the provisioning-profile secret.
+mas:
+  type: distribution
+  hardenedRuntime: false
+  notarize: false
+  entitlements: prebuilt/mas/entitlements.mas.plist
+  entitlementsInherit: prebuilt/entitlements.mas.inherit.plist
+  provisioningProfile: prebuilt/mas/embedded.provisionprofile
+  artifactName: ${productName}-${version}-mas-${arch}.${ext}
+  # Only standard HTTPS/TLS, which is exempt: answers the export-compliance
+  # question in the binary so a build never waits on it in App Store Connect.
+  extendInfo:
+    ITSAppUsesNonExemptEncryption: false
+
 linux:
   icon: prebuilt/icon.png
   category: Network
