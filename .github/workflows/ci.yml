@@ -129,9 +129,9 @@ jobs:
           pkgutil --check-signature "$pkg"
           codesign --verify --deep --strict release/mas-arm64/*.app
       - name: Store release notes (fallback text without Bedrock)
-        run: npx tsx scripts/release-notes.ts --store
-        env:
-          GITHUB_REF_NAME: HEAD
+        # On a PR GITHUB_REF_NAME is "<n>/merge", not a ref git knows, and a
+        # step's `env:` can't override GITHUB_* — set it on the command.
+        run: GITHUB_REF_NAME=HEAD npx tsx scripts/release-notes.ts --store
       - name: Load the fastlane lanes
         run: bundle exec fastlane lanes
       - name: Clean signing material
