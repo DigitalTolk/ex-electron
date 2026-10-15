@@ -63,3 +63,74 @@ jobs:
         run: npx tsx scripts/build-app.ts --dir
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # The Mac App Store job only runs on a release tag, so a break in it used to
+  # surface only after tagging (v0.0.19: CI's gem install in vendor/bundle
+  # tripped `eslint .`). PRs that touch what that job depends on run it here,
+  # same environment and secrets, up to the signed .pkg — without uploading.
+  mas-changes:
+    name: Mac App Store inputs changed?
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: diff
+        run: |
+          if git diff --name-only "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \
+            | grep -qE '^(fastlane/|Gemfile|prebuilt/|scripts/(build-mas|build-app|derive-version|release-notes)\.ts$|electron-builder\.yml$|package(-lock)?\.json$|eslint\.config\.mjs$|\.github/workflows/)'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  mas-dry-run:
+    name: Mac App Store dry run
+    needs: mas-changes
+    # Signing needs the repository secrets, which fork and Dependabot PRs
+    # don't get.
+    if: >-
+      needs.mas-changes.outputs.changed == 'true' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]'
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+      - run: npm ci
+      - name: Package for the Mac App Store
+        run: npm run dist:mas
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          MAS_PROVISIONING_PROFILE_BASE64: ${{ secrets.MAS_PROVISIONING_PROFILE_BASE64 }}
+          CSC_LINK: ${{ secrets.MAS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAS_CSC_KEY_PASSWORD }}
+          CSC_INSTALLER_LINK: ${{ secrets.MAS_INSTALLER_CSC_LINK }}
+          CSC_INSTALLER_KEY_PASSWORD: ${{ secrets.MAS_INSTALLER_CSC_KEY_PASSWORD }}
+      - name: Check the package the upload lane would pick up
+        run: |
+          pkg=$(find release -name '*-mas-*.pkg' | head -1)
+          test -n "$pkg" || { echo "no Mac App Store package under release/"; exit 1; }
+          pkgutil --check-signature "$pkg"
+          codesign --verify --deep --strict release/mas-arm64/*.app
+      - name: Store release notes (fallback text without Bedrock)
+        run: npx tsx scripts/release-notes.ts --store
+        env:
+          GITHUB_REF_NAME: HEAD
+      - name: Load the fastlane lanes
+        run: bundle exec fastlane lanes
+      - name: Clean signing material
+        if: always()
+        run: rm -rf prebuilt/mas
