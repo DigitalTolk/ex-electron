@@ -119,6 +119,9 @@ jobs:
           CSC_KEY_PASSWORD: ${{ secrets.MAS_CSC_KEY_PASSWORD }}
           CSC_INSTALLER_LINK: ${{ secrets.MAS_INSTALLER_CSC_LINK }}
           CSC_INSTALLER_KEY_PASSWORD: ${{ secrets.MAS_INSTALLER_CSC_KEY_PASSWORD }}
+          # electron-builder skips signing on any PR build unless told
+          # otherwise; this job's `if` already limits it to same-repo PRs.
+          CSC_FOR_PULL_REQUEST: 'true'
       - name: Check the package the upload lane would pick up
         run: |
           pkg=$(find release -name '*-mas-*.pkg' | head -1)
