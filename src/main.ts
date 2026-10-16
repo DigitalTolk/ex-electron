@@ -11,6 +11,7 @@ import {
   shell,
   nativeImage,
   nativeTheme,
+  net,
   powerMonitor,
   session,
   type ContextMenuParams,
@@ -20,6 +21,8 @@ import {
 import path from 'node:path';
 import http from 'node:http';
 import fs from 'node:fs';
+import os from 'node:os';
+import { execFile, spawn } from 'node:child_process';
 import { loadSettings, saveSettings, type Settings } from './lib/settings';
 import { safeUrl, trimTrailingSlash, isHttpUrl, isSameHost } from './lib/url';
 import { imageFilename, uniqueDownloadPath } from './lib/download';
@@ -30,13 +33,14 @@ import { authStateForXhr, type ConnectionState } from './lib/connection';
 import { getDndState } from './lib/dnd-state';
 import { DND_IPC_CHANNEL } from './lib/dnd-bridge';
 import { ATTENTION_IPC_CHANNEL } from './lib/attention-bridge';
+import { RunnerManager, type RunResult } from './lib/runner-manager';
+import { RUNNER_CONTROL_IPC, RUNNER_STATE_IPC } from './lib/runner-control';
 import {
   APPROVAL_DECIDED_IPC,
   APPROVAL_NOTIFY_IPC,
   type ApprovalDecision,
   type ApprovalNotifyPayload,
 } from './lib/approval-bridge';
-import { RUNNER_TOKEN_IPC_CHANNEL } from './lib/runner-bridge';
 import {
   CONNECTOR_SSO_IPC,
   bearerFromAuthHeader,
@@ -45,7 +49,6 @@ import {
   type ConnectorSSORequest,
   type ConnectorSSOResult,
 } from './lib/connector-sso';
-import { dropLegacyToken, onRunnerToken, pauseRunner, stopRunner } from './lib/runner-host';
 
 let isQuitting = false;
 
@@ -62,15 +65,15 @@ if (!app.isPackaged) {
 // Dev builds run under their own identity. The single-instance lock below is
 // keyed to userData, so without this a packaged install and a dev build fight
 // over ONE lock — launching the second just focuses the first. A separate
-// userData dir also keeps dev settings, login, and runner state (runner-id,
-// token, warm-session cache) from clobbering the real install's.
+// userData dir also keeps dev settings and login from clobbering the real
+// install's.
 if (!app.isPackaged) {
   app.setName('ex-dev');
-  // EX_PROFILE gives each dev launch its OWN userData dir (session, login,
-  // runner identity) AND its own single-instance lock — so two instances can
-  // run side by side signed in as different users:
-  //   EX_PROFILE=alice npm start   # own window, own runner
-  //   EX_PROFILE=bob   npm start   # separate window + runner
+  // EX_PROFILE gives each dev launch its OWN userData dir (session, login)
+  // AND its own single-instance lock — so two instances can run side by side
+  // signed in as different users:
+  //   EX_PROFILE=alice npm start   # own window
+  //   EX_PROFILE=bob   npm start   # separate window
   // No EX_PROFILE keeps the default 'ex-dev' profile.
   const profile = process.env.EX_PROFILE ? `ex-dev-${process.env.EX_PROFILE.replace(/[^a-z0-9_-]/gi, '')}` : 'ex-dev';
   app.setName(profile);
@@ -124,6 +127,75 @@ if (!app.isPackaged && process.env.EX_CHAT_URL) {
 }
 let setupWindow: BrowserWindow | null = null;
 let chatWindow: BrowserWindow | null = null;
+
+// ex-runner on this computer, driven from the SPA's Runners tab (the logic
+// and its tests live in lib/runner-manager.ts; this is the process, network
+// and dialog wiring). The Mac App Store build can't run it: the sandbox
+// can't launch ex-runner or the agent CLIs.
+const runnerManager = new RunnerManager({
+  supported: !process.mas,
+  platform: process.platform,
+  arch: process.arch,
+  binDir: path.join(app.getPath('userData'), 'ex-runner', 'bin'),
+  home: process.env.EX_RUNNER_HOME || path.join(os.homedir(), '.ex-runner'),
+  searchDirs: [
+    ...new Set([
+      ...(process.env.PATH ?? '').split(path.delimiter).filter(Boolean),
+      '/opt/homebrew/bin',
+      '/usr/local/bin',
+      path.join(os.homedir(), '.local', 'bin'),
+    ]),
+  ],
+  serverUrl: () => settings.chatUrl ?? null,
+  env: process.env,
+  spawn: (cmd, args, env) => spawn(cmd, args, { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }),
+  run: (cmd, args, env) =>
+    new Promise<RunResult>((resolve) => {
+      execFile(cmd, args, { env, timeout: 120_000, maxBuffer: 4 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+        const code = err ? (typeof (err as { code?: unknown }).code === 'number' ? (err as { code: number }).code : 1) : 0;
+        resolve({ code, stdout: String(stdout), stderr: String(stderr || (err && !stdout ? err.message : '')) });
+      });
+    }),
+  // Chromium's network stack, so a system proxy applies like it does to chat.
+  fetch: (url) => net.fetch(url),
+  httpGet: (url) =>
+    new Promise<void>((resolve, reject) => {
+      http
+        .get(url, (res) => {
+          res.resume();
+          res.on('end', () => resolve());
+        })
+        .on('error', reject);
+    }),
+  confirmConnect: async (server) => {
+    const options = {
+      type: 'question' as const,
+      buttons: ['Connect', 'Cancel'],
+      defaultId: 0,
+      cancelId: 1,
+      message: 'Connect this computer to ex?',
+      detail: `ex-runner will run your Claude Code and Codex agents on this computer, for the account you're signed in with at ${new URL(server).host}.`,
+    };
+    const res =
+      chatWindow && !chatWindow.isDestroyed()
+        ? await dialog.showMessageBox(chatWindow, options)
+        : await dialog.showMessageBox(options);
+    return res.response === 0;
+  },
+  autoStart: {
+    get: () => settings.runnerAutoStart === true,
+    set: (on) => {
+      // Re-read the file so a dev-only EX_CHAT_URL override is never saved.
+      const saved = loadSettings(SETTINGS_FILE);
+      saved.runnerAutoStart = on;
+      saveSettings(SETTINGS_FILE, saved);
+      settings.runnerAutoStart = on;
+    },
+  },
+  onState: (state) => {
+    if (chatWindow && !chatWindow.isDestroyed()) chatWindow.webContents.send(RUNNER_STATE_IPC, state);
+  },
+});
 let tray: Tray | null = null;
 let unreadCount = 0;
 let pendingAuth: { server: http.Server; authUrl: string } | null = null;
@@ -901,9 +973,9 @@ function buildOverlayIcon(count: number): NativeImage | null {
 
 async function signOut(): Promise<void> {
   if (!settings.chatUrl) return;
-  // A signed-out user's agents must go offline, and the stored runner token
-  // dies with the session.
-  await stopRunner();
+  // A runner the app started runs for whoever connected it: it stops when
+  // they sign out of the app ("Start when ex opens" brings it back).
+  await runnerManager.shutdown();
   const ses = session.fromPartition(CHAT_PARTITION);
   try {
     await ses.clearStorageData({
@@ -961,13 +1033,11 @@ ipcMain.handle(DND_IPC_CHANNEL, (event) => {
   return getDndState();
 });
 
-// Agent-runner token from the SPA (via the chat-preload bridge). Guarded to
-// the chat window like every other chat-originated channel.
-ipcMain.on(RUNNER_TOKEN_IPC_CHANNEL, (event, token: unknown) => {
-  if (!fromChatWindow(event)) return;
-  if (typeof token !== 'string' || !token || token.length > 4096) return;
-  if (!settings.chatUrl) return;
-  onRunnerToken(token, settings.chatUrl);
+// The Runners tab's control over ex-runner (via the chat-preload bridge).
+// Always resolves, so the page sees the manager's own error text.
+ipcMain.handle(RUNNER_CONTROL_IPC, (event, op: unknown, arg: unknown) => {
+  if (!fromChatWindow(event)) return { ok: false, error: 'Not allowed.' };
+  return runnerManager.handle(op, arg);
 });
 
 ipcMain.on('connection:offline', (event) => {
@@ -1198,9 +1268,8 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
-  // Stop claiming and let in-flight leases lapse server-side; the token
-  // stays persisted so agents come back online on next launch.
-  void pauseRunner();
+  // A runner the app started stops with it; the signal goes out right away.
+  void runnerManager.shutdown();
 });
 
 // Waking from sleep is the most common way the chat WebSocket dies silently:
@@ -1216,10 +1285,6 @@ app.whenReady().then(() => {
   createTray();
   if (settings.chatUrl) {
     createChatWindow();
-    // Agents come online when the SPA hands a freshly minted token down —
-    // seconds later, and without a keychain prompt. Clear the token file
-    // v0.0.16 wrote so no build ever tries to decrypt it again.
-    dropLegacyToken();
   } else {
     createSetupWindow();
   }

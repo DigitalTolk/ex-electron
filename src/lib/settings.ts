@@ -3,6 +3,9 @@ import path from 'node:path';
 
 export interface Settings {
   chatUrl?: string;
+  // "Start when ex opens" on the Runners tab: start ex-runner when the app
+  // launches. Off unless the person turns it on.
+  runnerAutoStart?: boolean;
 }
 
 export function loadSettings(file: string): Settings {
