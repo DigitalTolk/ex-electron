@@ -31,6 +31,7 @@ import { overlayBadgeSvg } from './lib/overlay';
 import { AUTH_CALLBACK_HTML } from './lib/auth-callback';
 import { authStateForXhr, type ConnectionState } from './lib/connection';
 import { getDndState } from './lib/dnd-state';
+import { AT_LOGIN_ARG, registerLoginItem, setStartAtLogin, startsAtLogin } from './lib/login-item';
 import { DND_IPC_CHANNEL } from './lib/dnd-bridge';
 import { ATTENTION_IPC_CHANNEL } from './lib/attention-bridge';
 import { RunnerManager, type RunResult } from './lib/runner-manager';
@@ -87,16 +88,15 @@ if (!app.isPackaged) {
 // re-identifying a real install must be an explicit act, not ambient
 // environment. The name change also relabels the macOS menu ("Quit ex-stg"),
 // which is how you tell the two windows apart.
-if (app.isPackaged) {
-  const raw = process.argv.find((a) => a.startsWith('--profile='))?.slice('--profile='.length) ?? '';
-  const profileName = raw.replace(/[^a-z0-9_-]/gi, '');
-  if (profileName) {
-    // Prefix with the app's own name so profiles of an alternate-identity
-    // build (ex-stg) can never collide with the main install's profiles.
-    const profile = `${app.getName()}-${profileName}`;
-    app.setName(profile);
-    app.setPath('userData', path.join(app.getPath('appData'), profile));
-  }
+const profileName = app.isPackaged
+  ? (process.argv.find((a) => a.startsWith('--profile='))?.slice('--profile='.length) ?? '').replace(/[^a-z0-9_-]/gi, '')
+  : '';
+if (profileName) {
+  // Prefix with the app's own name so profiles of an alternate-identity
+  // build (ex-stg) can never collide with the main install's profiles.
+  const profile = `${app.getName()}-${profileName}`;
+  app.setName(profile);
+  app.setPath('userData', path.join(app.getPath('appData'), profile));
 }
 
 if (!app.requestSingleInstanceLock()) {
@@ -104,9 +104,17 @@ if (!app.requestSingleInstanceLock()) {
   process.exit(0);
 }
 
+const APP_USER_MODEL_ID = 'com.digitaltolk.ex.electron';
+
 if (process.platform === 'win32') {
-  app.setAppUserModelId('com.digitaltolk.ex.electron');
+  app.setAppUserModelId(APP_USER_MODEL_ID);
 }
+
+// Start with Windows (lib/login-item.ts), under the AppUserModelId as the Run
+// value name. Not for dev builds, whose executable is the bare Electron
+// runtime, nor for a --profile instance, which would take over the main
+// install's entry.
+const loginItemSupported = process.platform === 'win32' && app.isPackaged && !profileName;
 
 const SETTINGS_FILE = path.join(app.getPath('userData'), 'settings.json');
 
@@ -381,7 +389,9 @@ function createSetupWindow(): void {
   });
 }
 
-function createChatWindow(): void {
+// `minimized` opens straight to the taskbar without ever being shown, for a
+// launch at sign-in: chat connects and notifies, but nothing takes focus.
+function createChatWindow({ minimized = false } = {}): void {
   if (!settings.chatUrl) return;
   // Fresh window starts from a clean connection slate.
   resetReconnectState();
@@ -390,6 +400,7 @@ function createChatWindow(): void {
     height: 820,
     minWidth: 720,
     minHeight: 480,
+    show: !minimized,
     title: 'ex',
     icon: appIconPath(),
     backgroundColor: '#0a0a0a',
@@ -415,6 +426,8 @@ function createChatWindow(): void {
       partition: CHAT_PARTITION,
     },
   });
+  // Electron shows a never-shown window straight into the minimized state.
+  if (minimized) chatWindow.minimize();
 
   chatWindow.loadURL(settings.chatUrl);
 
@@ -821,6 +834,20 @@ function buildTrayMenu(): Menu {
       },
     },
     { type: 'separator' },
+    // Read when the menu is built; a change made in Windows' Startup apps
+    // while the app runs shows up on the next rebuild. Clicking still writes
+    // the state the checkbox now shows, so a stale one never inverts it.
+    ...(loginItemSupported
+      ? [
+          {
+            label: 'Start with Windows',
+            type: 'checkbox' as const,
+            checked: startsAtLogin(app, APP_USER_MODEL_ID),
+            click: (item: Electron.MenuItem) => setStartAtLogin(app, APP_USER_MODEL_ID, item.checked),
+          },
+          { type: 'separator' as const },
+        ]
+      : []),
     {
       label: 'Quit',
       click: () => {
@@ -1281,10 +1308,12 @@ powerMonitor.on('resume', () => {
 });
 
 app.whenReady().then(() => {
+  // Before the tray, whose menu reads the entry back.
+  if (loginItemSupported) registerLoginItem(app, APP_USER_MODEL_ID);
   Menu.setApplicationMenu(buildApplicationMenu());
   createTray();
   if (settings.chatUrl) {
-    createChatWindow();
+    createChatWindow({ minimized: process.argv.includes(AT_LOGIN_ARG) });
   } else {
     createSetupWindow();
   }

@@ -95,6 +95,7 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
+  include: prebuilt/installer.nsh
 
 extraResources:
   - from: prebuilt/icon.png
