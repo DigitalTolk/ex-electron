@@ -21,6 +21,7 @@ async function run(): Promise<void> {
       main: path.join(root, 'src/main.ts'),
       preload: path.join(root, 'src/preload.ts'),
       'chat-preload': path.join(root, 'src/chat-preload.ts'),
+      'status/status-preload': path.join(root, 'src/status/status-preload.ts'),
     },
     outdir: out,
     bundle: true,
@@ -57,6 +58,12 @@ async function run(): Promise<void> {
   await copyFile(
     path.join(root, 'src/setup/setup.html'),
     path.join(out, 'setup/setup.html'),
+  );
+  // The status screen (offline / unreachable / blocked) is a static page; its
+  // preload, bundled above, fills it in.
+  await copyFile(
+    path.join(root, 'src/status/status.html'),
+    path.join(out, 'status/status.html'),
   );
 }
 

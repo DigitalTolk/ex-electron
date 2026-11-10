@@ -15,6 +15,7 @@ export default defineConfig({
         'src/preload.ts',
         'src/chat-preload.ts',
         'src/setup/setup.ts',
+        'src/status/status-preload.ts',
       ],
       reporter: ['text', 'lcov'],
       reportsDirectory: 'coverage',
