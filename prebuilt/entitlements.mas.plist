@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Mac App Store build: the sandbox is mandatory. Network for the chat
+       server, user-picked files for attachments, Downloads for saved files.
+       Nothing captures camera or microphone, and App Review rejects unused
+       entitlements, so neither is declared. The agent runner (child
+       processes) is disabled in this build: see runner-host. -->
+  <key>com.apple.security.app-sandbox</key>
+  <true/>
+  <key>com.apple.security.network.client</key>
+  <true/>
+  <key>com.apple.security.files.user-selected.read-write</key>
+  <true/>
+  <key>com.apple.security.files.downloads.read-write</key>
+  <true/>
+  <key>com.apple.security.application-groups</key>
+  <array>
+    <string>TEAMID.com.digitaltolk.ex.electron</string>
+  </array>
+</dict>
+</plist>

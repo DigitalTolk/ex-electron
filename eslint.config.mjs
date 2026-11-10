@@ -3,7 +3,9 @@ import tseslint from 'typescript-eslint';
 
 export default [
   {
-    ignores: ['dist/**', 'release/**', 'build/**', 'node_modules/**'],
+    // vendor/: CI's ruby/setup-ruby installs fastlane's gems (with their own JS)
+    // into vendor/bundle for the Mac App Store job.
+    ignores: ['dist/**', 'release/**', 'build/**', 'node_modules/**', 'vendor/**'],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

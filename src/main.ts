@@ -11,15 +11,19 @@ import {
   shell,
   nativeImage,
   nativeTheme,
+  net,
   powerMonitor,
   session,
   type ContextMenuParams,
   type MenuItemConstructorOptions,
   type NativeImage,
+  WebContentsView,
 } from 'electron';
 import path from 'node:path';
 import http from 'node:http';
 import fs from 'node:fs';
+import os from 'node:os';
+import { execFile, spawn } from 'node:child_process';
 import { loadSettings, saveSettings, type Settings } from './lib/settings';
 import { safeUrl, trimTrailingSlash, isHttpUrl, isSameHost } from './lib/url';
 import { imageFilename, uniqueDownloadPath } from './lib/download';
@@ -29,15 +33,17 @@ import { overlayBadgeSvg } from './lib/overlay';
 import { AUTH_CALLBACK_HTML } from './lib/auth-callback';
 import { authStateForXhr, type ConnectionState } from './lib/connection';
 import { getDndState } from './lib/dnd-state';
+import { AT_LOGIN_ARG, registerLoginItem, setStartAtLogin, startsAtLogin } from './lib/login-item';
 import { DND_IPC_CHANNEL } from './lib/dnd-bridge';
 import { ATTENTION_IPC_CHANNEL } from './lib/attention-bridge';
+import { RunnerManager, type RunResult } from './lib/runner-manager';
+import { RUNNER_CONTROL_IPC, RUNNER_STATE_IPC } from './lib/runner-control';
 import {
   APPROVAL_DECIDED_IPC,
   APPROVAL_NOTIFY_IPC,
   type ApprovalDecision,
   type ApprovalNotifyPayload,
 } from './lib/approval-bridge';
-import { RUNNER_TOKEN_IPC_CHANNEL } from './lib/runner-bridge';
 import {
   CONNECTOR_SSO_IPC,
   bearerFromAuthHeader,
@@ -46,7 +52,18 @@ import {
   type ConnectorSSORequest,
   type ConnectorSSOResult,
 } from './lib/connector-sso';
-import { dropLegacyToken, onRunnerToken, pauseRunner, stopRunner } from './lib/runner-host';
+import {
+  PAGE_FACTS_SCRIPT,
+  STATUS_CHANGE_SERVER_IPC,
+  STATUS_CONTENT_IPC,
+  STATUS_RETRY_IPC,
+  cloudflareProblem,
+  loadFailureProblem,
+  pageFacts,
+  retriesAutomatically,
+  statusContent,
+  type LoadProblem,
+} from './lib/load-status';
 
 let isQuitting = false;
 
@@ -63,15 +80,15 @@ if (!app.isPackaged) {
 // Dev builds run under their own identity. The single-instance lock below is
 // keyed to userData, so without this a packaged install and a dev build fight
 // over ONE lock — launching the second just focuses the first. A separate
-// userData dir also keeps dev settings, login, and runner state (runner-id,
-// token, warm-session cache) from clobbering the real install's.
+// userData dir also keeps dev settings and login from clobbering the real
+// install's.
 if (!app.isPackaged) {
   app.setName('ex-dev');
-  // EX_PROFILE gives each dev launch its OWN userData dir (session, login,
-  // runner identity) AND its own single-instance lock — so two instances can
-  // run side by side signed in as different users:
-  //   EX_PROFILE=alice npm start   # own window, own runner
-  //   EX_PROFILE=bob   npm start   # separate window + runner
+  // EX_PROFILE gives each dev launch its OWN userData dir (session, login)
+  // AND its own single-instance lock — so two instances can run side by side
+  // signed in as different users:
+  //   EX_PROFILE=alice npm start   # own window
+  //   EX_PROFILE=bob   npm start   # separate window
   // No EX_PROFILE keeps the default 'ex-dev' profile.
   const profile = process.env.EX_PROFILE ? `ex-dev-${process.env.EX_PROFILE.replace(/[^a-z0-9_-]/gi, '')}` : 'ex-dev';
   app.setName(profile);
@@ -85,16 +102,15 @@ if (!app.isPackaged) {
 // re-identifying a real install must be an explicit act, not ambient
 // environment. The name change also relabels the macOS menu ("Quit ex-stg"),
 // which is how you tell the two windows apart.
-if (app.isPackaged) {
-  const raw = process.argv.find((a) => a.startsWith('--profile='))?.slice('--profile='.length) ?? '';
-  const profileName = raw.replace(/[^a-z0-9_-]/gi, '');
-  if (profileName) {
-    // Prefix with the app's own name so profiles of an alternate-identity
-    // build (ex-stg) can never collide with the main install's profiles.
-    const profile = `${app.getName()}-${profileName}`;
-    app.setName(profile);
-    app.setPath('userData', path.join(app.getPath('appData'), profile));
-  }
+const profileName = app.isPackaged
+  ? (process.argv.find((a) => a.startsWith('--profile='))?.slice('--profile='.length) ?? '').replace(/[^a-z0-9_-]/gi, '')
+  : '';
+if (profileName) {
+  // Prefix with the app's own name so profiles of an alternate-identity
+  // build (ex-stg) can never collide with the main install's profiles.
+  const profile = `${app.getName()}-${profileName}`;
+  app.setName(profile);
+  app.setPath('userData', path.join(app.getPath('appData'), profile));
 }
 
 if (!app.requestSingleInstanceLock()) {
@@ -102,9 +118,17 @@ if (!app.requestSingleInstanceLock()) {
   process.exit(0);
 }
 
+const APP_USER_MODEL_ID = 'com.digitaltolk.ex.electron';
+
 if (process.platform === 'win32') {
-  app.setAppUserModelId('com.digitaltolk.ex.electron');
+  app.setAppUserModelId(APP_USER_MODEL_ID);
 }
+
+// Start with Windows (lib/login-item.ts), under the AppUserModelId as the Run
+// value name. Not for dev builds, whose executable is the bare Electron
+// runtime, nor for a --profile instance, which would take over the main
+// install's entry.
+const loginItemSupported = process.platform === 'win32' && app.isPackaged && !profileName;
 
 const SETTINGS_FILE = path.join(app.getPath('userData'), 'settings.json');
 
@@ -125,6 +149,75 @@ if (!app.isPackaged && process.env.EX_CHAT_URL) {
 }
 let setupWindow: BrowserWindow | null = null;
 let chatWindow: BrowserWindow | null = null;
+
+// ex-runner on this computer, driven from the SPA's Runners tab (the logic
+// and its tests live in lib/runner-manager.ts; this is the process, network
+// and dialog wiring). The Mac App Store build can't run it: the sandbox
+// can't launch ex-runner or the agent CLIs.
+const runnerManager = new RunnerManager({
+  supported: !process.mas,
+  platform: process.platform,
+  arch: process.arch,
+  binDir: path.join(app.getPath('userData'), 'ex-runner', 'bin'),
+  home: process.env.EX_RUNNER_HOME || path.join(os.homedir(), '.ex-runner'),
+  searchDirs: [
+    ...new Set([
+      ...(process.env.PATH ?? '').split(path.delimiter).filter(Boolean),
+      '/opt/homebrew/bin',
+      '/usr/local/bin',
+      path.join(os.homedir(), '.local', 'bin'),
+    ]),
+  ],
+  serverUrl: () => settings.chatUrl ?? null,
+  env: process.env,
+  spawn: (cmd, args, env) => spawn(cmd, args, { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }),
+  run: (cmd, args, env) =>
+    new Promise<RunResult>((resolve) => {
+      execFile(cmd, args, { env, timeout: 120_000, maxBuffer: 4 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+        const code = err ? (typeof (err as { code?: unknown }).code === 'number' ? (err as { code: number }).code : 1) : 0;
+        resolve({ code, stdout: String(stdout), stderr: String(stderr || (err && !stdout ? err.message : '')) });
+      });
+    }),
+  // Chromium's network stack, so a system proxy applies like it does to chat.
+  fetch: (url) => net.fetch(url),
+  httpGet: (url) =>
+    new Promise<void>((resolve, reject) => {
+      http
+        .get(url, (res) => {
+          res.resume();
+          res.on('end', () => resolve());
+        })
+        .on('error', reject);
+    }),
+  confirmConnect: async (server) => {
+    const options = {
+      type: 'question' as const,
+      buttons: ['Connect', 'Cancel'],
+      defaultId: 0,
+      cancelId: 1,
+      message: 'Connect this computer to ex?',
+      detail: `ex-runner will run your Claude Code and Codex agents on this computer, for the account you're signed in with at ${new URL(server).host}.`,
+    };
+    const res =
+      chatWindow && !chatWindow.isDestroyed()
+        ? await dialog.showMessageBox(chatWindow, options)
+        : await dialog.showMessageBox(options);
+    return res.response === 0;
+  },
+  autoStart: {
+    get: () => settings.runnerAutoStart === true,
+    set: (on) => {
+      // Re-read the file so a dev-only EX_CHAT_URL override is never saved.
+      const saved = loadSettings(SETTINGS_FILE);
+      saved.runnerAutoStart = on;
+      saveSettings(SETTINGS_FILE, saved);
+      settings.runnerAutoStart = on;
+    },
+  },
+  onState: (state) => {
+    if (chatWindow && !chatWindow.isDestroyed()) chatWindow.webContents.send(RUNNER_STATE_IPC, state);
+  },
+});
 let tray: Tray | null = null;
 let unreadCount = 0;
 let pendingAuth: { server: http.Server; authUrl: string } | null = null;
@@ -135,6 +228,9 @@ const CHAT_PARTITION = 'persist:ex-chat';
 // preload's world so we get untampered copies of the DOM APIs; any unused id
 // works since all worlds in a frame share the same document.
 const IMAGE_PROBE_WORLD_ID = 1010;
+// Isolated world that reads a loaded page's text to recognise Cloudflare's
+// error pages (see showLoadedPageOrProblem).
+const PAGE_TEXT_WORLD_ID = 1011;
 
 // ---- connection / reconnect state ------------------------------------------
 //
@@ -197,6 +293,119 @@ function scheduleReload(): void {
 function recoverFromFailure(): void {
   setConnectionState('reconnecting');
   scheduleReload();
+}
+
+// ---- status screen ----------------------------------------------------------
+//
+// When the chat page can't open at all (offline, server unreachable, a
+// Cloudflare block or outage) a full-window status screen covers it: a local
+// page in its own view, so the chat webContents keeps its URL and the reload
+// machinery above keeps working underneath. It goes away on the next good load.
+let statusView: WebContentsView | null = null;
+// The status page has loaded and its preload is listening. Not
+// webContents.isLoading(): that can still be true inside did-finish-load.
+let statusViewReady = false;
+let statusProblem: LoadProblem | null = null;
+// HTTP status of the chat window's last main-frame navigation (did-navigate),
+// read on did-finish-load to spot Cloudflare's error pages. MAIN_FRAME_FAILED
+// after a did-fail-load: Chromium's empty error page that replaces it fires
+// did-finish-load too, and must not clear the status screen.
+const MAIN_FRAME_FAILED = -1;
+let lastMainFrameStatus = 0;
+
+function chatHost(): string {
+  const raw = settings.chatUrl ?? '';
+  return safeUrl(raw)?.host ?? raw;
+}
+
+function sendStatusContent(): void {
+  if (!statusView || !statusProblem || !statusViewReady) return;
+  statusView.webContents.send(STATUS_CONTENT_IPC, statusContent(statusProblem));
+}
+
+function fitStatusView(): void {
+  if (!statusView || !chatWindow || chatWindow.isDestroyed()) return;
+  const [width, height] = chatWindow.getContentSize();
+  statusView.setBounds({ x: 0, y: 0, width, height });
+}
+
+function showStatusScreen(problem: LoadProblem): void {
+  if (!chatWindow || chatWindow.isDestroyed()) return;
+  statusProblem = problem;
+  if (!statusView) {
+    const view = new WebContentsView({
+      webPreferences: {
+        preload: path.join(__dirname, 'status', 'status-preload.js'),
+        contextIsolation: true,
+        sandbox: true,
+        nodeIntegration: false,
+      },
+    });
+    // The web app's background, so nothing flashes before the page paints.
+    view.setBackgroundColor(nativeTheme.shouldUseDarkColors ? '#1A1A1A' : '#FCFCFB');
+    view.webContents.on('did-finish-load', () => {
+      statusViewReady = true;
+      sendStatusContent();
+    });
+    view.webContents.on('will-navigate', (event) => event.preventDefault());
+    view.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    void view.webContents.loadFile(path.join(__dirname, 'status', 'status.html'));
+    statusView = view;
+  }
+  if (!chatWindow.contentView.children.includes(statusView)) {
+    chatWindow.contentView.addChildView(statusView);
+  }
+  fitStatusView();
+  sendStatusContent();
+}
+
+function hideStatusScreen(): void {
+  statusProblem = null;
+  if (statusView && chatWindow && !chatWindow.isDestroyed()) {
+    chatWindow.contentView.removeChildView(statusView);
+  }
+}
+
+function destroyStatusScreen(): void {
+  statusProblem = null;
+  if (statusView && !statusView.webContents.isDestroyed()) statusView.webContents.close();
+  statusView = null;
+  statusViewReady = false;
+}
+
+// The chat page couldn't open: cover it with the status screen, and retry on a
+// timer unless the problem won't heal by itself (a block).
+function failChatLoad(problem: LoadProblem): void {
+  setConnectionState('reconnecting');
+  showStatusScreen(problem);
+  if (retriesAutomatically(problem)) scheduleReload();
+  else clearReloadTimer();
+}
+
+// did-finish-load: a normal page clears the status screen; one of Cloudflare's
+// own error pages (an error status + "Error 1009"-style code, read from the
+// page in an isolated world) is replaced by it.
+async function showLoadedPageOrProblem(win: BrowserWindow): Promise<void> {
+  const status = lastMainFrameStatus;
+  if (status === MAIN_FRAME_FAILED) return;
+  if (status >= 400) {
+    const facts: unknown = await win.webContents
+      .executeJavaScriptInIsolatedWorld(PAGE_TEXT_WORLD_ID, [{ code: PAGE_FACTS_SCRIPT }])
+      .catch(() => null);
+    if (win !== chatWindow || win.isDestroyed()) return;
+    const problem = cloudflareProblem(status, pageFacts(facts), chatHost(), new Date());
+    if (problem) {
+      failChatLoad(problem);
+      return;
+    }
+  }
+  reloadDelayMs = 1000;
+  hideStatusScreen();
+  // A successful load clears any transient connectivity banner. Leave an
+  // auth-expired banner alone — only a fresh, authenticated session (which
+  // we can't confirm from here) should clear it, and the webRequest watcher
+  // will re-flag it on the next 401 if it's still expired.
+  if (isReconnectableState(connectionState)) setConnectionState('connected');
 }
 
 // Force an immediate reconnect, bypassing the backoff timer — used when we have
@@ -310,7 +519,9 @@ function createSetupWindow(): void {
   });
 }
 
-function createChatWindow(): void {
+// `minimized` opens straight to the taskbar without ever being shown, for a
+// launch at sign-in: chat connects and notifies, but nothing takes focus.
+function createChatWindow({ minimized = false } = {}): void {
   if (!settings.chatUrl) return;
   // Fresh window starts from a clean connection slate.
   resetReconnectState();
@@ -319,6 +530,7 @@ function createChatWindow(): void {
     height: 820,
     minWidth: 720,
     minHeight: 480,
+    show: !minimized,
     title: 'ex',
     icon: appIconPath(),
     backgroundColor: '#0a0a0a',
@@ -344,6 +556,8 @@ function createChatWindow(): void {
       partition: CHAT_PARTITION,
     },
   });
+  // Electron shows a never-shown window straight into the minimized state.
+  if (minimized) chatWindow.minimize();
 
   chatWindow.loadURL(settings.chatUrl);
 
@@ -405,20 +619,23 @@ function createChatWindow(): void {
   // did-fail-load (DNS hiccup, server restart) otherwise leaves a blank
   // window with no recovery. The reconnect helpers (module scope) handle the
   // exponential backoff; here we just map each event onto a state + a retry.
-  chatWindow.webContents.on('did-finish-load', () => {
-    reloadDelayMs = 1000;
-    // A successful load clears any transient connectivity banner. Leave an
-    // auth-expired banner alone — only a fresh, authenticated session (which
-    // we can't confirm from here) should clear it, and the webRequest watcher
-    // will re-flag it on the next 401 if it's still expired.
-    if (isReconnectableState(connectionState)) setConnectionState('connected');
+  const win = chatWindow;
+  win.webContents.on('did-navigate', (_e, _url, httpResponseCode) => {
+    lastMainFrameStatus = httpResponseCode;
   });
-  chatWindow.webContents.on('did-fail-load', (_e, code, _desc, _url, isMainFrame) => {
-    // -3 = ERR_ABORTED, fired for user-initiated nav cancels. Subframes
-    // failing to load is the chat SPA's problem, not ours.
-    if (!isMainFrame || code === -3) return;
-    recoverFromFailure();
+  win.webContents.on('did-finish-load', () => {
+    void showLoadedPageOrProblem(win);
   });
+  win.webContents.on('did-fail-load', (_e, code, desc, _url, isMainFrame) => {
+    // Subframes failing to load is the chat SPA's problem, not ours; a null
+    // problem is ERR_ABORTED (a cancelled navigation).
+    if (!isMainFrame) return;
+    const problem = loadFailureProblem(code, desc, net.isOnline(), chatHost(), new Date());
+    if (!problem) return;
+    lastMainFrameStatus = MAIN_FRAME_FAILED;
+    failChatLoad(problem);
+  });
+  win.on('resize', fitStatusView);
   chatWindow.webContents.on('render-process-gone', (_e, details) => {
     if (details.reason === 'clean-exit') return;
     recoverFromFailure();
@@ -443,6 +660,7 @@ function createChatWindow(): void {
 
   chatWindow.on('closed', () => {
     resetReconnectState();
+    destroyStatusScreen();
     chatWindow = null;
   });
 }
@@ -756,6 +974,20 @@ function buildTrayMenu(): Menu {
       },
     },
     { type: 'separator' },
+    // Read when the menu is built; a change made in Windows' Startup apps
+    // while the app runs shows up on the next rebuild. Clicking still writes
+    // the state the checkbox now shows, so a stale one never inverts it.
+    ...(loginItemSupported
+      ? [
+          {
+            label: 'Start with Windows',
+            type: 'checkbox' as const,
+            checked: startsAtLogin(app, APP_USER_MODEL_ID),
+            click: (item: Electron.MenuItem) => setStartAtLogin(app, APP_USER_MODEL_ID, item.checked),
+          },
+          { type: 'separator' as const },
+        ]
+      : []),
     {
       label: 'Quit',
       click: () => {
@@ -908,9 +1140,9 @@ function buildOverlayIcon(count: number): NativeImage | null {
 
 async function signOut(): Promise<void> {
   if (!settings.chatUrl) return;
-  // A signed-out user's agents must go offline, and the stored runner token
-  // dies with the session.
-  await stopRunner();
+  // A runner the app started runs for whoever connected it: it stops when
+  // they sign out of the app ("Start when ex opens" brings it back).
+  await runnerManager.shutdown();
   const ses = session.fromPartition(CHAT_PARTITION);
   try {
     await ses.clearStorageData({
@@ -968,13 +1200,11 @@ ipcMain.handle(DND_IPC_CHANNEL, (event) => {
   return getDndState();
 });
 
-// Agent-runner token from the SPA (via the chat-preload bridge). Guarded to
-// the chat window like every other chat-originated channel.
-ipcMain.on(RUNNER_TOKEN_IPC_CHANNEL, (event, token: unknown) => {
-  if (!fromChatWindow(event)) return;
-  if (typeof token !== 'string' || !token || token.length > 4096) return;
-  if (!settings.chatUrl) return;
-  onRunnerToken(token, settings.chatUrl);
+// The Runners tab's control over ex-runner (via the chat-preload bridge).
+// Always resolves, so the page sees the manager's own error text.
+ipcMain.handle(RUNNER_CONTROL_IPC, (event, op: unknown, arg: unknown) => {
+  if (!fromChatWindow(event)) return { ok: false, error: 'Not allowed.' };
+  return runnerManager.handle(op, arg);
 });
 
 ipcMain.on('connection:offline', (event) => {
@@ -989,6 +1219,22 @@ ipcMain.on('connection:online', (event) => {
   // Connectivity returned after a loss — force a fresh load so the SPA opens a
   // new WebSocket instead of waiting on its own (often slow) backoff.
   if (isReconnectableState(connectionState)) reconnectNow();
+});
+
+// The status screen's buttons (and its back-online event). Only that view may
+// send these.
+function fromStatusView(event: Electron.IpcMainEvent): boolean {
+  return !!statusView && !statusView.webContents.isDestroyed() && event.sender === statusView.webContents;
+}
+
+ipcMain.on(STATUS_RETRY_IPC, (event) => {
+  if (!fromStatusView(event)) return;
+  reconnectNow();
+});
+
+ipcMain.on(STATUS_CHANGE_SERVER_IPC, (event) => {
+  if (!fromStatusView(event)) return;
+  changeChatUrl();
 });
 
 ipcMain.on('connection:signin', (event) => {
@@ -1205,9 +1451,8 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
-  // Stop claiming and let in-flight leases lapse server-side; the token
-  // stays persisted so agents come back online on next launch.
-  void pauseRunner();
+  // A runner the app started stops with it; the signal goes out right away.
+  void runnerManager.shutdown();
 });
 
 // Waking from sleep is the most common way the chat WebSocket dies silently:
@@ -1219,14 +1464,12 @@ powerMonitor.on('resume', () => {
 });
 
 app.whenReady().then(() => {
+  // Before the tray, whose menu reads the entry back.
+  if (loginItemSupported) registerLoginItem(app, APP_USER_MODEL_ID);
   Menu.setApplicationMenu(buildApplicationMenu());
   createTray();
   if (settings.chatUrl) {
-    createChatWindow();
-    // Agents come online when the SPA hands a freshly minted token down —
-    // seconds later, and without a keychain prompt. Clear the token file
-    // v0.0.16 wrote so no build ever tries to decrypt it again.
-    dropLegacyToken();
+    createChatWindow({ minimized: process.argv.includes(AT_LOGIN_ARG) });
   } else {
     createSetupWindow();
   }

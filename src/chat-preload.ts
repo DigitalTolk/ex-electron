@@ -14,16 +14,18 @@ import {
   type ApprovalDecision,
 } from './lib/approval-bridge';
 import {
-  RUNNER_BRIDGE_SOURCE,
-  RUNNER_TOKEN_IPC_CHANNEL,
-  installRunnerTokenListener,
-} from './lib/runner-bridge';
-import {
   CONNECTOR_SSO_BRIDGE_SOURCE,
   CONNECTOR_SSO_IPC,
   installConnectorSSOAnswerer,
   type ConnectorSSOResult,
 } from './lib/connector-sso';
+import {
+  RUNNER_CONTROL_BRIDGE_SOURCE,
+  RUNNER_CONTROL_IPC,
+  RUNNER_STATE_IPC,
+  installRunnerControlAnswerer,
+  type RunnerControlResult,
+} from './lib/runner-control';
 import { CHAT_DRAG_REGION_CSS } from './lib/drag-region';
 import {
   CONNECTION_BANNER_CSS,
@@ -71,16 +73,6 @@ installApprovalAnswerer(
   (relay) => ipcRenderer.on(APPROVAL_DECIDED_IPC, (_event, decision: ApprovalDecision) => relay(decision)),
 );
 
-// Agent-runner token handoff: the SPA mints the runner-scoped token (it
-// holds the interactive session) and hands it to the shell, which runs the
-// local agent harness. Same shared-DOM crossing as the DnD bridge.
-webFrame.executeJavaScript(RUNNER_BRIDGE_SOURCE).catch((err) => {
-  console.error('runner bridge failed:', err);
-});
-installRunnerTokenListener(document, (token) => {
-  ipcRenderer.send(RUNNER_TOKEN_IPC_CHANNEL, token);
-});
-
 // Connector one-click SSO: the SPA asks the shell to open a service's own
 // sign-in window (the user authenticates with Microsoft there) and resolves
 // with the bearer the service mints, captured from its redirect. Same
@@ -90,6 +82,18 @@ webFrame.executeJavaScript(CONNECTOR_SSO_BRIDGE_SOURCE).catch((err) => {
   console.error('connector sso bridge failed:', err);
 });
 installConnectorSSOAnswerer(document, (req) => ipcRenderer.invoke(CONNECTOR_SSO_IPC, req) as Promise<ConnectorSSOResult>);
+
+// ex-runner control for the SPA's Runners tab: install, connect, start and
+// stop ex-runner on this computer, with its state pushed back. Same
+// shared-DOM crossing; main validates every op (lib/runner-manager.ts).
+webFrame.executeJavaScript(RUNNER_CONTROL_BRIDGE_SOURCE).catch((err) => {
+  console.error('runner control bridge failed:', err);
+});
+installRunnerControlAnswerer(
+  document,
+  (op, arg) => ipcRenderer.invoke(RUNNER_CONTROL_IPC, op, arg) as Promise<RunnerControlResult>,
+  (relay) => ipcRenderer.on(RUNNER_STATE_IPC, (_event, state: unknown) => relay(state)),
+);
 
 webFrame.insertCSS(CHAT_DRAG_REGION_CSS);
 webFrame.insertCSS(CONNECTION_BANNER_CSS);

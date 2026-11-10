@@ -61,6 +61,57 @@ jobs:
             release/*.exe
           if-no-files-found: warn
 
+  mac-app-store:
+    name: Mac App Store
+    # Independent of the direct-download packages: a store rejection must not
+    # hold back the GitHub Release, and vice versa.
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+      - run: npm ci
+      - name: Package for the Mac App Store
+        run: npm run dist:mas
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          MAS_PROVISIONING_PROFILE_BASE64: ${{ secrets.MAS_PROVISIONING_PROFILE_BASE64 }}
+          # Apple Distribution (application) and Mac Installer Distribution
+          # certificates, each a base64 .p12. These are NOT the Developer ID
+          # certificate the direct-download build signs with.
+          CSC_LINK: ${{ secrets.MAS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAS_CSC_KEY_PASSWORD }}
+          CSC_INSTALLER_LINK: ${{ secrets.MAS_INSTALLER_CSC_LINK }}
+          CSC_INSTALLER_KEY_PASSWORD: ${{ secrets.MAS_INSTALLER_CSC_KEY_PASSWORD }}
+      - name: Generate App Store release notes
+        run: npx tsx scripts/release-notes.ts --store > release/mas-release-notes.txt
+        env:
+          AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
+          AWS_REGION: eu-north-1
+          BEDROCK_MODEL_ID: ${{ secrets.BEDROCK_MODEL_ID }}
+      - name: Upload to App Store Connect
+        run: bundle exec fastlane mac app_store_release
+        env:
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+      - name: Keep the package
+        uses: actions/upload-artifact@v7
+        with:
+          name: ex-mac-app-store
+          path: release/**/*-mas-*.pkg
+      - name: Clean signing material
+        if: always()
+        run: rm -rf prebuilt/mas
+
   release:
     name: GitHub Release
     needs: package

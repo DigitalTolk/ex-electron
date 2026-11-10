@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>ex</title>
+    <meta name="color-scheme" content="light dark" />
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'none'; style-src 'unsafe-inline'" />
+    <style>
+      /*
+       * Matches the ex web app: its design tokens (ex/src/index.css), the
+       * error-page layout (NotFoundPage / ResourceErrorPage) and the default +
+       * outline buttons, in the system font. Light/dark follow the system, as
+       * the web app does. Literal values: this page can't load ex's CSS — the
+       * server is exactly what we couldn't reach.
+       */
+
+      :root {
+        --background: #FCFCFB;
+        --foreground: #0B0B0B;
+        --muted: #F5F5F5;
+        --muted-foreground: #6D6B64;
+        --border: #E3E3E2;
+        --ring: #BDBCBC;
+        --cta: #0B0B0B;
+        --cta-hover: #4F4C4D;
+        --cta-foreground: #FFFFFF;
+        --outline-bg: #FCFCFB;
+        --outline-hover: #F5F5F5;
+        --outline-border: #E3E3E2;
+        --spinner-track: #E9E9E9;
+        --spinner-head: #7B7979;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --background: #1A1A1A;
+          --foreground: #FFFFFF;
+          --muted: #2C2C2C;
+          --muted-foreground: #A7A5A6;
+          --border: #242424;
+          --ring: #A7A5A6;
+          /* The CTA is pink in dark, near-black in light (button.tsx). */
+          --cta: #C15071;
+          --cta-hover: #A9455F;
+          --cta-foreground: #FFFFFF;
+          --outline-bg: rgba(74, 74, 74, 0.3);
+          --outline-hover: rgba(74, 74, 74, 0.5);
+          --outline-border: #4A4A4A;
+          --spinner-track: #4A4A4A;
+          --spinner-head: #A7A5A6;
+        }
+      }
+
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; }
+      body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 32px;
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        color: var(--muted-foreground);
+        background: var(--background);
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      /* The chat window has no title bar on macOS: keep the top draggable. */
+      .drag {
+        position: fixed;
+        top: 0; left: 0; right: 0;
+        height: 40px;
+        -webkit-app-region: drag;
+      }
+      main {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 16px;
+        max-width: 28rem;
+        text-align: center;
+      }
+      .icon { width: 48px; height: 48px; color: var(--muted-foreground); opacity: 0.6; }
+      .text { display: flex; flex-direction: column; gap: 4px; }
+      h1 { margin: 0; font-size: 18px; line-height: 28px; font-weight: 600; color: var(--foreground); }
+      p { margin: 0; }
+      .retrying { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; }
+      .spinner {
+        width: 12px; height: 12px;
+        border-radius: 9999px;
+        border: 2px solid var(--spinner-track);
+        border-top-color: var(--spinner-head);
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+      button {
+        display: inline-flex;
+        align-items: center;
+        height: 32px;
+        padding: 0 12px;
+        border-radius: 8px;
+        border: 1px solid transparent;
+        font: inherit;
+        font-size: 14px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: background-color 120ms ease;
+        -webkit-app-region: no-drag;
+      }
+      button:focus-visible { outline: none; border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 50%, transparent); }
+      button:active { transform: translateY(1px); }
+      button:disabled { opacity: 0.5; cursor: default; transform: none; }
+      #retry { background: var(--cta); color: var(--cta-foreground); }
+      #retry:not(:disabled):hover { background: var(--cta-hover); }
+      #change { background: var(--outline-bg); color: var(--foreground); border-color: var(--outline-border); }
+      #change:hover { background: var(--outline-hover); }
+      .detail {
+        margin-top: 8px;
+        padding: 10px 14px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--muted);
+        font-size: 12px;
+        line-height: 1.7;
+        text-align: left;
+        white-space: pre-line;
+        font-variant-numeric: tabular-nums;
+        -webkit-user-select: text;
+        user-select: text;
+        cursor: text;
+      }
+      [hidden] { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <div class="drag"></div>
+    <main role="alert" aria-live="polite">
+      <!-- lucide icons, as the web app uses; the preload shows the one for the problem. -->
+      <svg class="icon" data-icon="offline" hidden viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 20h.01"/><path d="M8.5 16.429a5 5 0 0 1 7 0"/><path d="M5 12.859a10 10 0 0 1 5.17-2.69"/><path d="M19 12.859a10 10 0 0 0-2.007-1.523"/><path d="M2 8.82a15 15 0 0 1 4.177-2.643"/><path d="M22 8.82a15 15 0 0 0-11.288-3.764"/><path d="m2 2 20 20"/>
+      </svg>
+      <svg class="icon" data-icon="unreachable" hidden viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M7 2h13a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-5"/><path d="M10 10 2.5 2.5C2 2 2 2.5 2 5v3a2 2 0 0 0 2 2h6z"/><path d="M22 17v-1a2 2 0 0 0-2-2h-1"/><path d="M4 14a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h16.5l1-.5.5.5-8-8H4z"/><path d="M6 18h.01"/><path d="m2 2 20 20"/>
+      </svg>
+      <svg class="icon" data-icon="server-down" hidden viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>
+      </svg>
+      <svg class="icon" data-icon="blocked" hidden viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 8v4"/><path d="M12 16h.01"/>
+      </svg>
+      <div class="text">
+        <h1 id="title">Connecting…</h1>
+        <p id="message"></p>
+      </div>
+      <div class="retrying" id="retrying" hidden><span class="spinner" aria-hidden="true"></span>Trying again automatically…</div>
+      <div class="actions">
+        <button id="retry" type="button">Try again</button>
+        <button id="change" type="button" hidden>Change server</button>
+      </div>
+      <div class="detail" id="detail" hidden></div>
+    </main>
+  </body>
+</html>
