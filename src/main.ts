@@ -17,6 +17,7 @@ import {
   type ContextMenuParams,
   type MenuItemConstructorOptions,
   type NativeImage,
+  WebContentsView,
 } from 'electron';
 import path from 'node:path';
 import http from 'node:http';
@@ -50,6 +51,18 @@ import {
   type ConnectorSSORequest,
   type ConnectorSSOResult,
 } from './lib/connector-sso';
+import {
+  PAGE_FACTS_SCRIPT,
+  STATUS_CHANGE_SERVER_IPC,
+  STATUS_CONTENT_IPC,
+  STATUS_RETRY_IPC,
+  cloudflareProblem,
+  loadFailureProblem,
+  pageFacts,
+  retriesAutomatically,
+  statusContent,
+  type LoadProblem,
+} from './lib/load-status';
 
 let isQuitting = false;
 
@@ -214,6 +227,9 @@ const CHAT_PARTITION = 'persist:ex-chat';
 // preload's world so we get untampered copies of the DOM APIs; any unused id
 // works since all worlds in a frame share the same document.
 const IMAGE_PROBE_WORLD_ID = 1010;
+// Isolated world that reads a loaded page's text to recognise Cloudflare's
+// error pages (see showLoadedPageOrProblem).
+const PAGE_TEXT_WORLD_ID = 1011;
 
 // ---- connection / reconnect state ------------------------------------------
 //
@@ -276,6 +292,119 @@ function scheduleReload(): void {
 function recoverFromFailure(): void {
   setConnectionState('reconnecting');
   scheduleReload();
+}
+
+// ---- status screen ----------------------------------------------------------
+//
+// When the chat page can't open at all (offline, server unreachable, a
+// Cloudflare block or outage) a full-window status screen covers it: a local
+// page in its own view, so the chat webContents keeps its URL and the reload
+// machinery above keeps working underneath. It goes away on the next good load.
+let statusView: WebContentsView | null = null;
+// The status page has loaded and its preload is listening. Not
+// webContents.isLoading(): that can still be true inside did-finish-load.
+let statusViewReady = false;
+let statusProblem: LoadProblem | null = null;
+// HTTP status of the chat window's last main-frame navigation (did-navigate),
+// read on did-finish-load to spot Cloudflare's error pages. MAIN_FRAME_FAILED
+// after a did-fail-load: Chromium's empty error page that replaces it fires
+// did-finish-load too, and must not clear the status screen.
+const MAIN_FRAME_FAILED = -1;
+let lastMainFrameStatus = 0;
+
+function chatHost(): string {
+  const raw = settings.chatUrl ?? '';
+  return safeUrl(raw)?.host ?? raw;
+}
+
+function sendStatusContent(): void {
+  if (!statusView || !statusProblem || !statusViewReady) return;
+  statusView.webContents.send(STATUS_CONTENT_IPC, statusContent(statusProblem));
+}
+
+function fitStatusView(): void {
+  if (!statusView || !chatWindow || chatWindow.isDestroyed()) return;
+  const [width, height] = chatWindow.getContentSize();
+  statusView.setBounds({ x: 0, y: 0, width, height });
+}
+
+function showStatusScreen(problem: LoadProblem): void {
+  if (!chatWindow || chatWindow.isDestroyed()) return;
+  statusProblem = problem;
+  if (!statusView) {
+    const view = new WebContentsView({
+      webPreferences: {
+        preload: path.join(__dirname, 'status', 'status-preload.js'),
+        contextIsolation: true,
+        sandbox: true,
+        nodeIntegration: false,
+      },
+    });
+    // The web app's background, so nothing flashes before the page paints.
+    view.setBackgroundColor(nativeTheme.shouldUseDarkColors ? '#1A1A1A' : '#FCFCFB');
+    view.webContents.on('did-finish-load', () => {
+      statusViewReady = true;
+      sendStatusContent();
+    });
+    view.webContents.on('will-navigate', (event) => event.preventDefault());
+    view.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    void view.webContents.loadFile(path.join(__dirname, 'status', 'status.html'));
+    statusView = view;
+  }
+  if (!chatWindow.contentView.children.includes(statusView)) {
+    chatWindow.contentView.addChildView(statusView);
+  }
+  fitStatusView();
+  sendStatusContent();
+}
+
+function hideStatusScreen(): void {
+  statusProblem = null;
+  if (statusView && chatWindow && !chatWindow.isDestroyed()) {
+    chatWindow.contentView.removeChildView(statusView);
+  }
+}
+
+function destroyStatusScreen(): void {
+  statusProblem = null;
+  if (statusView && !statusView.webContents.isDestroyed()) statusView.webContents.close();
+  statusView = null;
+  statusViewReady = false;
+}
+
+// The chat page couldn't open: cover it with the status screen, and retry on a
+// timer unless the problem won't heal by itself (a block).
+function failChatLoad(problem: LoadProblem): void {
+  setConnectionState('reconnecting');
+  showStatusScreen(problem);
+  if (retriesAutomatically(problem)) scheduleReload();
+  else clearReloadTimer();
+}
+
+// did-finish-load: a normal page clears the status screen; one of Cloudflare's
+// own error pages (an error status + "Error 1009"-style code, read from the
+// page in an isolated world) is replaced by it.
+async function showLoadedPageOrProblem(win: BrowserWindow): Promise<void> {
+  const status = lastMainFrameStatus;
+  if (status === MAIN_FRAME_FAILED) return;
+  if (status >= 400) {
+    const facts: unknown = await win.webContents
+      .executeJavaScriptInIsolatedWorld(PAGE_TEXT_WORLD_ID, [{ code: PAGE_FACTS_SCRIPT }])
+      .catch(() => null);
+    if (win !== chatWindow || win.isDestroyed()) return;
+    const problem = cloudflareProblem(status, pageFacts(facts), chatHost(), new Date());
+    if (problem) {
+      failChatLoad(problem);
+      return;
+    }
+  }
+  reloadDelayMs = 1000;
+  hideStatusScreen();
+  // A successful load clears any transient connectivity banner. Leave an
+  // auth-expired banner alone — only a fresh, authenticated session (which
+  // we can't confirm from here) should clear it, and the webRequest watcher
+  // will re-flag it on the next 401 if it's still expired.
+  if (isReconnectableState(connectionState)) setConnectionState('connected');
 }
 
 // Force an immediate reconnect, bypassing the backoff timer — used when we have
@@ -489,20 +618,23 @@ function createChatWindow({ minimized = false } = {}): void {
   // did-fail-load (DNS hiccup, server restart) otherwise leaves a blank
   // window with no recovery. The reconnect helpers (module scope) handle the
   // exponential backoff; here we just map each event onto a state + a retry.
-  chatWindow.webContents.on('did-finish-load', () => {
-    reloadDelayMs = 1000;
-    // A successful load clears any transient connectivity banner. Leave an
-    // auth-expired banner alone — only a fresh, authenticated session (which
-    // we can't confirm from here) should clear it, and the webRequest watcher
-    // will re-flag it on the next 401 if it's still expired.
-    if (isReconnectableState(connectionState)) setConnectionState('connected');
+  const win = chatWindow;
+  win.webContents.on('did-navigate', (_e, _url, httpResponseCode) => {
+    lastMainFrameStatus = httpResponseCode;
   });
-  chatWindow.webContents.on('did-fail-load', (_e, code, _desc, _url, isMainFrame) => {
-    // -3 = ERR_ABORTED, fired for user-initiated nav cancels. Subframes
-    // failing to load is the chat SPA's problem, not ours.
-    if (!isMainFrame || code === -3) return;
-    recoverFromFailure();
+  win.webContents.on('did-finish-load', () => {
+    void showLoadedPageOrProblem(win);
   });
+  win.webContents.on('did-fail-load', (_e, code, desc, _url, isMainFrame) => {
+    // Subframes failing to load is the chat SPA's problem, not ours; a null
+    // problem is ERR_ABORTED (a cancelled navigation).
+    if (!isMainFrame) return;
+    const problem = loadFailureProblem(code, desc, net.isOnline(), chatHost(), new Date());
+    if (!problem) return;
+    lastMainFrameStatus = MAIN_FRAME_FAILED;
+    failChatLoad(problem);
+  });
+  win.on('resize', fitStatusView);
   chatWindow.webContents.on('render-process-gone', (_e, details) => {
     if (details.reason === 'clean-exit') return;
     recoverFromFailure();
@@ -527,6 +659,7 @@ function createChatWindow({ minimized = false } = {}): void {
 
   chatWindow.on('closed', () => {
     resetReconnectState();
+    destroyStatusScreen();
     chatWindow = null;
   });
 }
@@ -1079,6 +1212,22 @@ ipcMain.on('connection:online', (event) => {
   // Connectivity returned after a loss — force a fresh load so the SPA opens a
   // new WebSocket instead of waiting on its own (often slow) backoff.
   if (isReconnectableState(connectionState)) reconnectNow();
+});
+
+// The status screen's buttons (and its back-online event). Only that view may
+// send these.
+function fromStatusView(event: Electron.IpcMainEvent): boolean {
+  return !!statusView && !statusView.webContents.isDestroyed() && event.sender === statusView.webContents;
+}
+
+ipcMain.on(STATUS_RETRY_IPC, (event) => {
+  if (!fromStatusView(event)) return;
+  reconnectNow();
+});
+
+ipcMain.on(STATUS_CHANGE_SERVER_IPC, (event) => {
+  if (!fromStatusView(event)) return;
+  changeChatUrl();
 });
 
 ipcMain.on('connection:signin', (event) => {
